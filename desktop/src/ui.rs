@@ -698,6 +698,7 @@ impl Workbench {
                 let selected = self.harnesses.iter().find(|h| h.id == form.harness).map(|h| h.label.clone()).unwrap_or_else(|| form.harness.clone());
                 div().flex().flex_col().gap_2().child(Self::caption("Harness"))
                     .child(form.harness_search.clone())
+                    .child(Self::caption(format!("{count} matching harnesses · selected: {selected}")))
                     .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(i, harness)| {
                         let id = harness.id.clone();
                         let selected_harness = form.harness == id;
@@ -705,7 +706,6 @@ impl Workbench {
                             if let Some(form) = this.form.as_mut() { form.harness = id.clone(); cx.notify(); }
                         }, cx)
                     })))
-                    .child(Self::caption(format!("{count} matching harnesses · selected: {selected}")))
             })
             .child(div().flex().flex_col().gap_2().child(Self::caption("Executable")).child(form.command.clone()))
             .child(div().flex().flex_col().gap_2().child(Self::caption("Arguments (JSON array)")).child(form.args.clone())
