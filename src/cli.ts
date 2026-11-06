@@ -17,6 +17,7 @@ const help = `agtop — agent-aware process manager
   agtop ps [--json]            Discover agents and sample CPU usage
   agtop run [options] -- COMMAND [ARGS...]
   agtop kill JOB_ID_OR_PID     Force-stop an agent tree
+  agtop cleanup                Stop every managed agent job
   agtop harnesses [QUERY] [--json]  List or search supported harnesses
   agtop mcp [--peer NAME]      MCP stdio server for agent-facing task containment
   agtop lemonade [--json]      Probe local server and loaded models
@@ -95,6 +96,18 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (rest.length !== 1) throw new Error("Usage: agtop kill JOB_ID_OR_PID");
     const result = await killAgentTree(rest[0]); console.log(JSON.stringify(result, null, 2));
     if (result.failedPids.length || result.errors.length) process.exitCode = 1; return;
+  }
+  if (command === "cleanup") {
+    if (rest.length) throw new Error("Usage: agtop cleanup");
+    const trees = (await listAgentTrees()).filter(t => t.containmentMode !== "passive-ppid");
+    const results = [];
+    for (const tree of trees) {
+      const result = await killAgentTree(tree.jobId);
+      results.push({ jobId: tree.jobId, ...result });
+    }
+    console.log(JSON.stringify(results, null, 2));
+    if (results.some(r => (r.failedPids as number[]).length || (r.errors as string[]).length)) process.exitCode = 1;
+    return;
   }
   if (command === "harnesses") {
     const unknown = rest.filter(arg => arg !== "--json");

@@ -42,6 +42,7 @@ bun agtop.ts --help
 bun agtop.ts ps --json
 bun agtop.ts harnesses claude
 bun agtop.ts mcp
+bun agtop.ts cleanup
 bun agtop.ts top
 bun agtop.ts run --harness codex -- codex
 bun agtop.ts kill JOB_ID
