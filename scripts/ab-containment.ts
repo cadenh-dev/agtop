@@ -74,7 +74,7 @@ try {
     stdio: "ignore",
     userOrPeer: "ab-test",
   });
-  await waitFor(() => findByMarker(cancelled).length > 0);
+  await waitFor(() => findByMarker(cancelled).length >= 2);
   const result = await cancelAgent.terminate();
   await cancelAgent.exited;
   await delay(500);

@@ -102,7 +102,7 @@ try {
       jobId,
       peer: "smoke",
     });
-    await waitFor(() => findByMarker(value).length > 0);
+    await waitFor(() => findByMarker(value).length >= 2);
     const status = await call("status", { jobId, includeProcesses: true });
     assert.equal(status.owned, true);
     assert.equal(typeof status.rootStartTime, "string");
@@ -130,7 +130,7 @@ try {
       jobId,
       peer: "smoke",
     });
-    await waitFor(() => findByMarker(value).length > 0);
+    await waitFor(() => findByMarker(value).length >= 2);
     const result = await call("cleanup");
     assert.equal(result.jobs.some((job: any) => job.jobId === jobId), true);
     await delay(500);
@@ -147,7 +147,7 @@ try {
       jobId,
       peer: "smoke",
     });
-    await waitFor(() => findByMarker(value).length > 0);
+    await waitFor(() => findByMarker(value).length >= 2);
     await client.close();
     await delay(1500);
     assert.deepEqual(findByMarker(value), []);
