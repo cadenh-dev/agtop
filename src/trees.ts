@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import { backendFor } from "./backend.js";
-import { detectHarness, harnesses } from "./discovery.js";
+import { detectHarness, harnesses, isLocalHarness } from "./discovery.js";
 import { resolveGitWorktree } from "./git.js";
 import type { AgentProcessTree, HarnessType, JobRecord, RawOsProcess } from "./types.js";
 
@@ -29,7 +29,7 @@ export function correlateTrees(processes: RawOsProcess[], jobs: JobRecord[], mem
     if (!procs.length) return;
     for (const p of procs) assigned.add(p.pid);
     const root = byPid.get(rootPid) || procs[0];
-    const detected = backendFor(procs, harness === "lemonade-server");
+    const detected = backendFor(procs, isLocalHarness(harness));
     const backend = record?.backend && record.backend !== "unknown" ? record.backend : detected.backend;
     trees.push({ jobId, harness, rootPid, processes: procs, backend,
       backendEvidence: backend === record?.backend && backend !== "unknown" ? "Recorded launch configuration" : detected.evidence,

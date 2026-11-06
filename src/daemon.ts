@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { listAgentTrees, killAgentTree, spawnContainedAgent } from "./manager.js";
 import { probeLemonade } from "./backend.js";
+import { harnessCatalog } from "./harnesses.js";
 import { stateDir } from "./registry.js";
 import type { ManagedAgent, SpawnAgentOptions } from "./types.js";
 
@@ -30,6 +31,7 @@ export async function startDaemon(options: { port?: number; token?: string } = {
     const expected = Buffer.from(`Bearer ${token}`);
     if (req.headers.origin || received.length !== expected.length || !timingSafeEqual(received, expected)) { reply(401, { error: "Bearer token required; browser origins are not accepted." }); return; }
     try {
+      if (req.method === "GET" && req.url === "/v1/harnesses") { reply(200, harnessCatalog()); return; }
       if (req.method === "GET" && req.url === "/v1/agents") { reply(200, await listAgentTrees()); return; }
       if (req.method === "GET" && req.url === "/v1/lemonade") { reply(200, await probeLemonade()); return; }
       if (req.method === "POST" && req.url === "/v1/agents") {

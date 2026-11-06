@@ -1,7 +1,9 @@
 import * as fs from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { HarnessType, RawOsProcess } from "./types.js";
+import type { RawOsProcess } from "./types.js";
+export { detectHarness, harnesses, harnessCatalog, harnessKind, harnessLabel, isLocalHarness } from "./harnesses.js";
+export type { HarnessDefinition, HarnessKind, HarnessRule } from "./harnesses.js";
 
 const exec = promisify(execFile);
 let linuxUnits: Promise<{ hz: number; page: number }> | undefined;
@@ -77,22 +79,3 @@ export class CpuSampler {
     return processes;
   }
 }
-const signatures: Record<string, HarnessType> = { opencode: "opencode", claude: "claude-code", "claude-code": "claude-code", aider: "aider", codex: "codex", goose: "goose", dsh: "deepseek-harness", "deepseek-harness": "deepseek-harness", lemonade: "lemonade-server", "lemonade-server": "lemonade-server", "llama-server": "lemonade-server" };
-const basename = (s: string) => s.replace(/\\/g, "/").split("/").pop()!.replace(/\.(exe|cmd|bat|js|cjs|mjs|py)$/i, "").toLowerCase();
-export function detectHarness(p: Pick<RawOsProcess, "name" | "cmdline" | "argv">): HarnessType | undefined {
-  const direct = signatures[basename(p.name)];
-  if (direct) return direct;
-  // Match the executable or interpreter entry point, never arbitrary prompt text.
-  const argv = p.argv ?? (p.cmdline.match(/"[^\"]*"|[^\s]+/g) || []).map(v => v.replace(/^"|"$/g, ""));
-  const executable = basename(argv[0] || p.name);
-  if (signatures[executable]) return signatures[executable];
-  if (!/^(node|bun|python[\d.]*|uv|uvx)$/.test(executable)) return;
-  let entry = argv[1];
-  if (entry === "-m") entry = argv[2];
-  if (!entry || entry.startsWith("-")) return;
-  const normalized = entry.replace(/\\/g, "/").toLowerCase();
-  if (normalized.includes("/@anthropic-ai/claude-code/")) return "claude-code";
-  if (normalized.includes("/@openai/codex/")) return "codex";
-  return signatures[basename(entry)];
-}
-export const harnesses = [...new Set([...Object.values(signatures), "custom" as const])];

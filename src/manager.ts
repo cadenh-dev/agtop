@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Writable } from "node:stream";
-import { CpuSampler, harnesses, linuxIdentity, scanLinuxProcesses, scanWindowsProcesses } from "./discovery.js";
+import { CpuSampler, harnesses, isLocalHarness, linuxIdentity, scanLinuxProcesses, scanWindowsProcesses } from "./discovery.js";
 import { backendFor, lemonadeBase } from "./backend.js";
 import { readJobs, reserveJob, validateJobId, writeJob } from "./registry.js";
 import { correlateTrees } from "./trees.js";
@@ -128,7 +128,7 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
   const command = executable(opts.command, cwd, env);
   const release = reserveJob(id);
   const record: JobRecord = { version: 1, jobId: id, rootPid: 0, startTime: "", harness: opts.harness, peer: env.AGTOP_PEER, cwd,
-    backend: backendFor([{ envTags: env } as RawOsProcess], opts.harness === "lemonade-server").backend,
+    backend: backendFor([{ envTags: env } as RawOsProcess], isLocalHarness(opts.harness)).backend,
     mode: process.platform === "win32" ? "win32-job-object" : "linux-env-pgid", createdAt: new Date().toISOString() };
   if (process.platform === "win32") {
     let native: ReturnType<ReturnType<typeof windowsApi>["launch"]> | undefined;

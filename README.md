@@ -4,11 +4,11 @@
 
 Agent-aware process discovery and containment for Windows and Linux. Use it as a terminal monitor, a TypeScript library, or a local HTTP service for an Electron application.
 
-Recognizes Claude Code, Codex, OpenCode, aider, goose, dsh, DeepSeek harnesses, and Lemonade/llama servers. Managed jobs can use any executable.
+Recognizes coding agents such as Claude Code, Codex, OpenCode, aider, Goose, Gemini CLI, Qwen Code, Cursor Agent, Antigravity, OpenHands, and Plandex, plus local inference servers such as Lemonade, Ollama, llama.cpp, LM Studio, vLLM, SGLang, LocalAI, KoboldCpp, Tabby, and TGI. Run `agtop harnesses` to list or search the full catalog. Managed jobs can use any executable.
 
 ## Native desktop UI
 
-The desktop is built in Rust with [GPUI](https://gpui.rs/). It has live agent lists, filtering, repository and branch details, CPU/RSS totals, a process tree, Lemonade status, and launch/stop controls. It uses the same containment engine as the CLI through an authenticated loopback connection. HTTP requests run on a worker thread so scans do not block the window.
+The desktop is built in Rust with [GPUI](https://gpui.rs/). It has live agent lists, full-text filtering across harnesses, commands, branches, peers, and PIDs, repository and branch details, CPU/RSS totals, a process tree, Lemonade status, and launch/stop controls. It uses the same containment engine as the CLI through an authenticated loopback connection. HTTP requests run on a worker thread so scans do not block the window.
 
 ```sh
 bun install
@@ -18,7 +18,7 @@ bun run desktop
 
 Or, after building the CLI, use `agtop ui`. This starts a private daemon on an available port and opens the GPUI window. Closing the window stops jobs launched by that session and removes its token file. Independently discovered agents are left running. Launching background jobs discards stdout/stderr; use `agtop run` in a terminal for interactive harness sessions.
 
-The launch form takes an executable, an exact JSON argument array, and an optional working directory. On Windows, a Codex npm shim can be launched as `cmd.exe` with `["/c", "codex.cmd"]`. Stopping a tree requires confirmation in the UI; the API verifies the selected root's creation time before acting. Keyboard shortcuts: Ctrl+N to launch, Ctrl+R to refresh, Tab to move focus, Escape to cancel, and Ctrl+Q to quit.
+The launch form has a searchable harness picker (backed by the daemon's harness catalog), an executable, an exact JSON argument array, and an optional working directory. On Windows, a Codex npm shim can be launched as `cmd.exe` with `["/c", "codex.cmd"]`. Stopping a tree requires confirmation in the UI; the API verifies the selected root's creation time before acting. Keyboard shortcuts: Ctrl+N to launch, Ctrl+R to refresh, Tab to move focus, Escape to cancel, and Ctrl+Q to quit.
 
 Building the desktop requires a current Rust MSVC toolchain plus Visual Studio C++ Build Tools and the Windows SDK on Windows. On Linux it requires Rust, a C/C++ toolchain, pkg-config, fontconfig, Wayland/X11 and xkbcommon development libraries, and a Vulkan-capable graphics driver. See [Zed's Linux dependency guide](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md) for platform package names. GPUI is pinned to 0.2.2 and the dependency graph is locked in `desktop/Cargo.lock`.
 
@@ -40,6 +40,7 @@ Requires Bun for development, or Node.js 22+ for the built JavaScript. Windows c
 bun install
 bun agtop.ts --help
 bun agtop.ts ps --json
+bun agtop.ts harnesses claude
 bun agtop.ts top
 bun agtop.ts run --harness codex -- codex
 bun agtop.ts kill JOB_ID
@@ -90,6 +91,19 @@ In Electron, use the library from the main process and expose a narrow applicati
 | `linux-env-pgid` | Default Linux fallback: a detached process group plus inherited `AGTOP_*` tags. This supports attribution of many reparented children, but termination is best effort. |
 | `passive-ppid` | Discovery of independently started processes. Termination uses the observed processes with creation-time checks. It cannot provide atomic containment or recover arbitrary descendants that reparented before discovery. |
 
+### Recognition
+
+Passive discovery does not require agent cooperation. agtop reads the OS process table (CIM on Windows, `/proc` on Linux) and matches a process by executable basename, interpreter entry point, install path, Python module, or a disambiguating subcommand:
+
+- `claude`, `codex`, `opencode`, `crush`, `ollama`, `llama-server`, `tritonserver`
+- `node .../@anthropic-ai/claude-code/cli.js`, `node .../@openai/codex/bin/codex.js`
+- `python -m aider`, `python -m vllm.entrypoints.openai.api_server`, `uvx aider`
+- `goose session`, `gh copilot`, `q chat`, `tabby serve`
+
+It never searches prompts or arbitrary arguments, so `git commit -m codex` and `node -e "console.log('claude')"` are not agents. Generic names such as `agent`, `gh`, `q`, `cn`, `goose`, and `tabby` require a second signal (a subcommand, package path, or working directory) to avoid false positives. `agtop harnesses [QUERY]` lists the catalog and its agent/server classification.
+
+Managed launches do not rely on recognition: agtop writes a job record and injects `AGTOP_JOB_ID`, `AGTOP_HARNESS`, `AGTOP_PEER`, and `AGTOP_WORKTREE` before the harness starts. Children inherit those tags automatically; agtop does not attach to or tag processes that are already running. On Windows, Job Object membership is authoritative even when an intermediate shell exits; on Linux, a cgroup provides the same guarantee, while the process-group fallback is best effort.
+
 To use cgroups, provide a **previously delegated writable cgroup v2 directory**:
 
 ```sh
@@ -124,6 +138,7 @@ The server binds to `127.0.0.1`. Its startup message gives the token file path. 
 
 | Method | Path | Result |
 | --- | --- | --- |
+| GET | `/v1/harnesses` | Supported harness catalog: id, label and kind |
 | GET | `/v1/agents` | Agent trees, CPU/RSS, worktree and containment metadata |
 | GET | `/v1/lemonade` | Local server status |
 | POST | `/v1/agents` | Spawn options JSON; returns job ID, PID and containment mode |
@@ -142,4 +157,4 @@ bun run compile
 
 `compile` produces `dist/agtop.exe` on Windows or `dist/agtop` on Linux, embedding the Bun runtime and Koffi native modules. Build on the target OS. The Windows executable has been tested from a separate directory without `node_modules`. It is larger than a native Rust binary. Keep Koffi as a runtime dependency when distributing the unbundled JavaScript library.
 
-Tests exercise real disposable process trees, cross-process discovery/termination, normal cleanup, argument preservation, duplicate IDs, daemon authentication, and Windows manager-crash cleanup. Parser and correlation tests cover Linux stat fields, CPU deltas, PID reuse, worktree attribution, and backend evidence. Set `AGTOP_TEST_CGROUP_ROOT` to run the delegated-cgroup integration test. GitHub Actions runs Windows and Linux checks, including a delegated cgroup test on Linux. Linux runtime behavior has not been locally verified on the Windows development host.
+Tests exercise real disposable process trees, cross-process discovery/termination, normal cleanup, argument preservation, duplicate IDs, daemon authentication, and Windows manager-crash cleanup. Parser and correlation tests cover Linux stat fields, CPU deltas, PID reuse, worktree attribution, backend evidence, and harness recognition (interpreter paths, Python modules, subcommand disambiguation, and false-positive cases). Set `AGTOP_TEST_CGROUP_ROOT` to run the delegated-cgroup integration test. GitHub Actions runs Windows and Linux checks, including a delegated cgroup test on Linux. Linux runtime behavior has not been locally verified on the Windows development host.

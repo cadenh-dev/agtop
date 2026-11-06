@@ -1,7 +1,6 @@
 import type { Backend, RawOsProcess } from "./types.js";
 
 export function backendFor(processes: RawOsProcess[], localEngine = false): { backend: Backend; evidence: string } {
-  if (localEngine) return { backend: "local-engine", evidence: "Local server executable" };
   for (const p of processes) {
     const env = p.envTags || {};
     if (env.AGTOP_BACKEND === "amd-lemonade-local") return { backend: "amd-lemonade-local", evidence: "Explicit launch configuration" };
@@ -13,6 +12,7 @@ export function backendFor(processes: RawOsProcess[], localEngine = false): { ba
       } catch {}
     }
   }
+  if (localEngine) return { backend: "local-engine", evidence: "Local inference server executable" };
   return { backend: "unknown", evidence: "No observable endpoint configuration" };
 }
 export function lemonadeBase(raw = "http://127.0.0.1:13305"): string {

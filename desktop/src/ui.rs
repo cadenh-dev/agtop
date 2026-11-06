@@ -1,7 +1,7 @@
 use crate::{
     client::{Command, Config, Event},
     input::TextInput,
-    model::{Agent, Launch, Lemonade, parse_arguments},
+    model::{Agent, Harness, Launch, Lemonade, parse_arguments},
     theme::*,
 };
 use gpui::{div, prelude::*, *};
@@ -20,12 +20,14 @@ struct LaunchForm {
     command: Entity<TextInput>,
     args: Entity<TextInput>,
     cwd: Entity<TextInput>,
+    harness_search: Entity<TextInput>,
     harness: String,
     lemonade: bool,
 }
 
 pub struct Workbench {
     agents: Vec<Agent>,
+    harnesses: Vec<Harness>,
     selected: Option<String>,
     filter: u8,
     search: Entity<TextInput>,
@@ -45,7 +47,8 @@ pub struct Workbench {
 impl Workbench {
     pub fn new(config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (commands, events) = crate::client::start(config);
-        let search = cx.new(|cx| TextInput::new("Filter by agent, branch, peer or PID", "", cx));
+        let search =
+            cx.new(|cx| TextInput::new("Filter by agent, command, branch, peer or PID", "", cx));
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus);
@@ -60,6 +63,7 @@ impl Workbench {
         });
         Self {
             agents: vec![],
+            harnesses: fallback_harnesses(),
             selected: None,
             filter: 0,
             search,
@@ -98,6 +102,11 @@ impl Workbench {
                     }
                     self.agents = agents;
                     self.last_success = Some(Instant::now());
+                }
+                Event::Harnesses(catalog) => {
+                    if !catalog.is_empty() {
+                        self.harnesses = catalog;
+                    }
                 }
                 Event::Lemonade(status) => self.lemonade = Some(status),
                 Event::Error(error) => {
@@ -141,10 +150,13 @@ impl Workbench {
         let command =
             cx.new(|cx| TextInput::new(if cfg!(windows) { "cmd.exe" } else { "codex" }, "", cx));
         window.focus(&command.focus_handle(cx));
+        let harness_search = cx.new(|cx| TextInput::new("Search by name or kind", "", cx));
+        cx.observe(&harness_search, |_, _, cx| cx.notify()).detach();
         self.form = Some(LaunchForm {
             command,
             args: cx.new(|cx| TextInput::new("[]", "[]", cx)),
             cwd: cx.new(|cx| TextInput::new("Leave empty for the manager's directory", "", cx)),
+            harness_search,
             harness: "custom".into(),
             lemonade: false,
         });
@@ -679,10 +691,22 @@ impl Workbench {
         div().id("launch-form").flex_1().min_w_0().h_full().overflow_y_scroll().p_6().flex().flex_col().gap_5()
             .child(div().text_size(px(26.)).font_weight(FontWeight::SEMIBOLD).child("Launch an agent"))
             .child(Self::caption("Start a harness with process-tree containment."))
-            .child(div().flex().flex_col().gap_2().child(Self::caption("Harness"))
-                .child(div().flex().flex_wrap().gap_2().children(["custom", "codex", "claude-code", "opencode", "aider", "goose"].into_iter().enumerate().map(|(i, harness)| {
-                    Self::action(("harness", i), harness, form.harness == harness, move |this, _, cx| { if let Some(form) = this.form.as_mut() { form.harness = harness.into(); cx.notify(); } }, cx)
-                }))))
+            .child({
+                let query = form.harness_search.read(cx).content.as_ref();
+                let choices: Vec<Harness> = self.harnesses.iter().filter(|h| h.matches(query)).cloned().collect();
+                let count = choices.len();
+                let selected = self.harnesses.iter().find(|h| h.id == form.harness).map(|h| h.label.clone()).unwrap_or_else(|| form.harness.clone());
+                div().flex().flex_col().gap_2().child(Self::caption("Harness"))
+                    .child(form.harness_search.clone())
+                    .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(i, harness)| {
+                        let id = harness.id.clone();
+                        let selected_harness = form.harness == id;
+                        Self::action(("harness", i), harness.label, selected_harness, move |this, _, cx| {
+                            if let Some(form) = this.form.as_mut() { form.harness = id.clone(); cx.notify(); }
+                        }, cx)
+                    })))
+                    .child(Self::caption(format!("{count} matching harnesses · selected: {selected}")))
+            })
             .child(div().flex().flex_col().gap_2().child(Self::caption("Executable")).child(form.command.clone()))
             .child(div().flex().flex_col().gap_2().child(Self::caption("Arguments (JSON array)")).child(form.args.clone())
                 .child(Self::caption(if cfg!(windows) { "For a Windows shim: cmd.exe with [\"/c\", \"codex.cmd\"]" } else { "For example: [\"--model\", \"my-model\"]" })))
@@ -693,6 +717,26 @@ impl Workbench {
                 .child(Self::action("launch", if self.busy { "Launching…" } else { "Launch agent" }, true, |this, _, cx| this.launch(cx), cx).when(self.busy || !self.connected(), |s| s.opacity(0.4)))
                 .child(Self::action("cancel-launch", "Cancel", false, |this, window, cx| { if !this.busy { this.form = None; window.focus(&this.focus); cx.notify(); } }, cx)))
     }
+}
+
+fn fallback_harnesses() -> Vec<Harness> {
+    [
+        ("custom", "Custom command", "custom"),
+        ("codex", "OpenAI Codex", "agent"),
+        ("claude-code", "Claude Code", "agent"),
+        ("opencode", "OpenCode", "agent"),
+        ("gemini-cli", "Gemini CLI", "agent"),
+        ("aider", "Aider", "agent"),
+        ("goose", "Block Goose", "agent"),
+        ("ollama", "Ollama", "server"),
+    ]
+    .into_iter()
+    .map(|(id, label, kind)| Harness {
+        id: id.into(),
+        label: label.into(),
+        kind: kind.into(),
+    })
+    .collect()
 }
 
 impl Render for Workbench {

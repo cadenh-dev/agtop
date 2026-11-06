@@ -1,4 +1,4 @@
-use crate::model::{Agent, KillResult, Launch, Lemonade};
+use crate::model::{Agent, Harness, KillResult, Launch, Lemonade};
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use std::{
@@ -127,6 +127,7 @@ pub enum Command {
 }
 pub enum Event {
     Snapshot(Vec<Agent>),
+    Harnesses(Vec<Harness>),
     Lemonade(Lemonade),
     Error(String),
     Completed(String),
@@ -138,6 +139,9 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
     let (events, receive_event) = mpsc::channel();
     std::thread::spawn(move || {
         let client = Client::new(config);
+        if let Ok(catalog) = client.get::<Vec<Harness>>("/v1/harnesses") {
+            let _ = events.send(Event::Harnesses(catalog));
+        }
         let mut next_probe = Instant::now();
         let mut first = true;
         loop {

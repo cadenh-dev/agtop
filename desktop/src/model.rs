@@ -44,8 +44,14 @@ impl Agent {
         &self.harness
     }
     pub fn matches(&self, query: &str) -> bool {
+        let processes = self
+            .processes
+            .iter()
+            .map(|p| format!("{} {} {}", p.name, p.cmdline, p.pid))
+            .collect::<Vec<_>>()
+            .join(" ");
         let text = format!(
-            "{} {} {} {} {} {}",
+            "{} {} {} {} {} {} {}",
             self.harness,
             self.job_id,
             self.root_pid,
@@ -54,7 +60,8 @@ impl Agent {
             self.git
                 .as_ref()
                 .map(|g| format!("{} {}", g.repo_root, g.branch))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            processes
         );
         text.to_lowercase().contains(&query.to_lowercase())
     }
@@ -109,6 +116,22 @@ pub struct Lemonade {
     pub loaded_models: Vec<String>,
     pub available_models: Vec<String>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Harness {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+}
+
+impl Harness {
+    pub fn matches(&self, query: &str) -> bool {
+        format!("{} {} {}", self.id, self.label, self.kind)
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -199,5 +222,31 @@ mod tests {
         };
         assert!(agent.matches("gpui"));
         assert!(!agent.matches("unrelated"));
+    }
+    #[test]
+    fn filter_includes_process_commands() {
+        let agent = Agent {
+            harness: "claude-code".into(),
+            processes: vec![Process {
+                name: "node".into(),
+                cmdline: "claude --resume".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(agent.matches("claude --resume"));
+        assert!(agent.matches("CLAUDE-CODE"));
+        assert!(!agent.matches("ollama"));
+    }
+    #[test]
+    fn harness_filter_matches_id_label_and_kind() {
+        let harness = Harness {
+            id: "claude-code".into(),
+            label: "Claude Code".into(),
+            kind: "agent".into(),
+        };
+        assert!(harness.matches("claude"));
+        assert!(harness.matches("agent"));
+        assert!(!harness.matches("server"));
     }
 }

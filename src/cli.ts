@@ -6,6 +6,7 @@ import { listAgentTrees, spawnContainedAgent, killAgentTree } from "./manager.js
 import { probeLemonade } from "./backend.js";
 import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
+import { harnessCatalog } from "./harnesses.js";
 import type { AgentProcessTree, HarnessType, SpawnAgentOptions } from "./types.js";
 
 const help = `agtop — agent-aware process manager
@@ -15,6 +16,7 @@ const help = `agtop — agent-aware process manager
   agtop ps [--json]            Discover agents and sample CPU usage
   agtop run [options] -- COMMAND [ARGS...]
   agtop kill JOB_ID_OR_PID     Force-stop an agent tree
+  agtop harnesses [QUERY] [--json]  List or search supported harnesses
   agtop lemonade [--json]      Probe local server and loaded models
   agtop daemon [--port 13309]  Authenticated loopback HTTP API
   agtop ui                    Native GPUI desktop interface
@@ -91,6 +93,19 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (rest.length !== 1) throw new Error("Usage: agtop kill JOB_ID_OR_PID");
     const result = await killAgentTree(rest[0]); console.log(JSON.stringify(result, null, 2));
     if (result.failedPids.length || result.errors.length) process.exitCode = 1; return;
+  }
+  if (command === "harnesses") {
+    const unknown = rest.filter(arg => arg !== "--json");
+    if (unknown.length > 1) throw new Error("Usage: agtop harnesses [QUERY] [--json]");
+    const query = (unknown[0] || "").toLowerCase();
+    const catalog = harnessCatalog().filter(h => `${h.id} ${h.label} ${h.kind}`.toLowerCase().includes(query));
+    if (rest.includes("--json")) console.log(JSON.stringify(catalog, null, 2));
+    else if (!catalog.length) console.log(`No harnesses match "${unknown[0]}".\n`);
+    else {
+      const width = Math.max(...catalog.map(h => h.id.length));
+      console.log(catalog.map(h => `${h.id.padEnd(width)}  ${h.kind.padEnd(6)}  ${h.label}`).join("\n") + "\n");
+    }
+    return;
   }
   if (command === "lemonade") {
     if (rest.some(a => a !== "--json")) throw new Error("Usage: agtop lemonade [--json]");

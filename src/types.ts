@@ -1,4 +1,15 @@
-export type HarnessType = "opencode" | "claude-code" | "aider" | "codex" | "goose" | "deepseek-harness" | "lemonade-server" | "custom";
+export type HarnessType =
+  | "claude-code" | "codex" | "opencode" | "aider" | "goose" | "deepseek-harness"
+  | "gemini-cli" | "qwen-code" | "cursor-agent" | "amp" | "crush" | "cline"
+  | "roo-code" | "kilo-code" | "continue-cli" | "openhands" | "swe-agent" | "plandex"
+  | "mentat" | "gpt-engineer" | "open-interpreter" | "cody" | "copilot-cli"
+  | "amazon-q" | "kiro" | "antigravity" | "aichat" | "shell-gpt" | "fabric"
+  | "mods" | "llm" | "smolagents" | "junie" | "droid" | "kimi" | "codebuff" | "ra-aid"
+  | "lemonade-server" | "ollama" | "llama-cpp" | "lm-studio" | "vllm" | "sglang"
+  | "localai" | "koboldcpp" | "text-generation-webui" | "jan" | "tabby" | "tabby-agent" | "open-webui"
+  | "aphrodite" | "exllamav2" | "mlc-llm" | "llama-cpp-python" | "tgi" | "triton"
+  | "mistralrs" | "xinference" | "llamafile" | "mlx-lm" | "openllm"
+  | "custom";
 export type Backend = "amd-lemonade-local" | "cloud-api" | "local-engine" | "unknown";
 export type ContainmentMode = "linux-cgroup" | "linux-env-pgid" | "win32-job-object" | "passive-ppid";
 export interface RawOsProcess {

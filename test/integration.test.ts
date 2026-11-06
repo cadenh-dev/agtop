@@ -110,6 +110,9 @@ test("daemon authenticates reads and mutations, rejects origins, and cleans up o
     expect((await fetch(`${base}/v1/agents`)).status).toBe(401);
     expect((await fetch(`${base}/v1/agents`, { headers: { authorization, origin: "https://example.com" } })).status).toBe(401);
     expect((await fetch(`${base}/v1/agents`, { headers: { authorization } })).status).toBe(200);
+    expect((await fetch(`${base}/v1/harnesses`)).status).toBe(401);
+    const catalog = await (await fetch(`${base}/v1/harnesses`, { headers: { authorization } })).json() as Array<{ id: string; kind: string }>;
+    expect(catalog.some(h => h.id === "claude-code" && h.kind === "agent")).toBe(true);
     const response = await fetch(`${base}/v1/agents`, { method: "POST", headers: { authorization, "content-type": "application/json" }, body: JSON.stringify({ harness: "custom", command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"] }) });
     expect(response.status).toBe(201); jobId = (await response.json() as { jobId: string }).jobId;
     expect((await listAgentTrees()).some(t => t.jobId === jobId)).toBe(true);
