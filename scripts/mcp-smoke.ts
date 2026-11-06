@@ -160,7 +160,7 @@ try {
 } finally {
   for (const value of markers) {
     const leftover = findByMarker(value);
-    if (leftover.length) console.error(`leftover for ${value}: ${leftover.map(p => p.pid).join(", ")}`);
+    if (leftover.length) console.error(`leftover for ${value}: ${leftover.map(p => `${p.pid}(${p.state ?? "?"}, ppid ${p.ppid}, ${p.name})`).join(", ")}`);
     killByMarker(value);
   }
   try { await client.close(); } catch {}

@@ -84,7 +84,12 @@ async function stopOwned(): Promise<void> {
   const started = Date.now();
   process.stderr.write(`agtop mcp: stopping ${jobs.length} owned job(s)\n`);
   const results = await Promise.allSettled(jobs.map(job => job.agent.terminate()));
-  const failures = results.flatMap(result => result.status === "rejected" ? [String(result.reason)] : []);
+  const failures = results.flatMap(result => {
+    if (result.status === "rejected") return [String(result.reason)];
+    return result.value.failedPids.length || result.value.errors.length
+      ? [`failed ${result.value.failedPids.join(",")} ${result.value.errors.join("; ")}`]
+      : [];
+  });
   if (failures.length) process.stderr.write(`agtop mcp: cleanup errors: ${failures.join("; ")}\n`);
   process.stderr.write(`agtop mcp: cleanup finished in ${Date.now() - started}ms\n`);
 }

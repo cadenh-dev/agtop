@@ -7,6 +7,7 @@ export interface ProcessProbe {
   ppid: number;
   name: string;
   cmdline: string;
+  state?: string;
 }
 
 /** Find processes whose command line contains a unique test marker. */
@@ -31,8 +32,10 @@ export function findByMarker(marker: string): ProcessProbe[] {
       const cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").replace(/\0/g, " ").trim();
       if (!cmdline.includes(marker)) continue;
       const stat = fs.readFileSync(`/proc/${entry}/stat`, "utf8");
-      const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[1]);
-      result.push({ pid: Number(entry), ppid, name: path.basename(cmdline.split(" ")[0] || ""), cmdline });
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      // A killed process can remain visible as a zombie until its parent reaps it.
+      if (fields[0] === "Z" || fields[0] === "X") continue;
+      result.push({ pid: Number(entry), ppid: Number(fields[1]), name: path.basename(cmdline.split(" ")[0] || ""), cmdline, state: fields[0] });
     } catch { /* process exited */ }
   }
   return result;
