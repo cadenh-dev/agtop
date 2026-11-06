@@ -41,6 +41,7 @@ bun install
 bun agtop.ts --help
 bun agtop.ts ps --json
 bun agtop.ts harnesses claude
+bun agtop.ts mcp
 bun agtop.ts top
 bun agtop.ts run --harness codex -- codex
 bun agtop.ts kill JOB_ID
@@ -146,15 +147,67 @@ The server binds to `127.0.0.1`. Its startup message gives the token file path. 
 
 Daemon-created processes use ignored stdio. Graceful shutdown terminates jobs created by that daemon. The token authorizes local process execution and termination, including passive discovered agents, so treat it as a local control credential. Command lines in snapshots can contain application-supplied secrets; only allow trusted consumers to access them.
 
+## MCP server
+
+`agtop mcp` is a stdio MCP server for agents. It provides **task-scoped containment**: an agent can start a long-lived helper or subagent, inspect it, wait for it, and stop it, but cannot stop jobs created by another session.
+
+| Tool | Purpose |
+| --- | --- |
+| `list` | Read-only summaries of all jobs; command lines are omitted for jobs this session does not own |
+| `status` | Inspect one job; full process details only for owned jobs |
+| `run` | Start a contained task and return its job ID |
+| `wait` | Wait for an owned job to exit, with a timeout |
+| `kill` | Stop an owned job and report exited/failed PIDs |
+| `cleanup` | Stop every job created by this MCP session |
+| `harnesses` | Search the supported harness catalog |
+| `lemonade` | Probe the local Lemonade server |
+
+The job ID is the task ID: pass your orchestrator or thread task ID as `jobId`, and a peer label as `peer`. OpenCode passes its session ID in MCP metadata; the server appends it to `AGTOP_PEER` automatically. `cleanup` and server shutdown terminate owned jobs, so a finished task does not leave watchers or dev servers behind. Output is discarded; use the agent's normal shell for commands whose stdout the agent needs.
+
+Register it globally. OpenCode V2 (`~/.config/opencode/opencode.json`):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "agtop": {
+        "type": "local",
+        "command": ["C:\\Users\\minisforum-zach\\.t3\\projects\\agent-aware-process-manager\\dist\\agtop.exe", "mcp"],
+        "codemode": false
+      }
+    }
+  }
+}
+```
+
+Codex CLI (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.agtop]
+command = "C:\\Users\\minisforum-zach\\.t3\\projects\\agent-aware-process-manager\\dist\\agtop.exe"
+args = ["mcp"]
+```
+
+Claude Code: `claude mcp add --scope user agtop -- "C:\...\agtop.exe" mcp`. Cursor uses the standard `mcpServers` shape in `~/.cursor/mcp.json`. Kiro and Antigravity use their ACP `mcpServers` configuration.
+
+The server's initialization instructions tell the agent when to use it. For a stronger prompt, install the skill in `skills/agtop/SKILL.md` into the agent's global skills directory.
+
+This is least-privilege: the MCP server only stops jobs it created; the authenticated daemon remains the full-control surface for the orchestrator. agtop is lifecycle containment, not a security sandbox, and command lines can contain secrets, so only expose the daemon view to trusted consumers.
+
 ## Build and verify
 
 ```sh
 bun run check
 bun test
+bun run test:mcp
+bun run bench:containment
 bun run build
 bun run compile
 ```
 
+`bun run test:mcp` starts the MCP server, exercises the tool surface, verifies scoped kill and cleanup, and checks that closing the session reaps its jobs. `bun run bench:containment` compares a direct spawn with agtop normal exit and cancellation; the baseline intentionally leaks one detached grandchild, and the script kills its own leftovers in a `finally` block.
+
 `compile` produces `dist/agtop.exe` on Windows or `dist/agtop` on Linux, embedding the Bun runtime and Koffi native modules. Build on the target OS. The Windows executable has been tested from a separate directory without `node_modules`. It is larger than a native Rust binary. Keep Koffi as a runtime dependency when distributing the unbundled JavaScript library.
 
-Tests exercise real disposable process trees, cross-process discovery/termination, normal cleanup, argument preservation, duplicate IDs, daemon authentication, and Windows manager-crash cleanup. Parser and correlation tests cover Linux stat fields, CPU deltas, PID reuse, worktree attribution, backend evidence, and harness recognition (interpreter paths, Python modules, subcommand disambiguation, and false-positive cases). Set `AGTOP_TEST_CGROUP_ROOT` to run the delegated-cgroup integration test. GitHub Actions runs Windows and Linux checks, including a delegated cgroup test on Linux. Linux runtime behavior has not been locally verified on the Windows development host.
+Tests exercise real disposable process trees, cross-process discovery/termination, normal cleanup, argument preservation, duplicate IDs, daemon authentication, and Windows manager-crash cleanup. Parser and correlation tests cover Linux stat fields, CPU deltas, PID reuse, worktree attribution, backend evidence, and harness recognition (interpreter paths, Python modules, subcommand disambiguation, and false-positive cases). The MCP smoke test and containment benchmark exercise task-scoped ownership, scoped termination, session shutdown, and detached-grandchild cleanup. Set `AGTOP_TEST_CGROUP_ROOT` to run the delegated-cgroup integration test. GitHub Actions runs Windows and Linux checks, including a delegated cgroup test on Linux. Linux runtime behavior has not been locally verified on the Windows development host.

@@ -7,6 +7,7 @@ import { probeLemonade } from "./backend.js";
 import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
 import { harnessCatalog } from "./harnesses.js";
+import { startMcpServer } from "./mcp.js";
 import type { AgentProcessTree, HarnessType, SpawnAgentOptions } from "./types.js";
 
 const help = `agtop — agent-aware process manager
@@ -17,6 +18,7 @@ const help = `agtop — agent-aware process manager
   agtop run [options] -- COMMAND [ARGS...]
   agtop kill JOB_ID_OR_PID     Force-stop an agent tree
   agtop harnesses [QUERY] [--json]  List or search supported harnesses
+  agtop mcp [--peer NAME]      MCP stdio server for agent-facing task containment
   agtop lemonade [--json]      Probe local server and loaded models
   agtop daemon [--port 13309]  Authenticated loopback HTTP API
   agtop ui                    Native GPUI desktop interface
@@ -105,6 +107,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const width = Math.max(...catalog.map(h => h.id.length));
       console.log(catalog.map(h => `${h.id.padEnd(width)}  ${h.kind.padEnd(6)}  ${h.label}`).join("\n") + "\n");
     }
+    return;
+  }
+  if (command === "mcp") {
+    if (rest.length && (rest.length !== 2 || rest[0] !== "--peer")) throw new Error("Usage: agtop mcp [--peer NAME]");
+    await startMcpServer({ peer: rest.length ? rest[1] : undefined });
     return;
   }
   if (command === "lemonade") {

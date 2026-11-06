@@ -1,0 +1,53 @@
+---
+name: agtop
+description: Use agtop's MCP tools for task-scoped containment when starting long-lived helpers, watchers, dev servers, test runners, or subagents that must not leak after the task. Covers run, wait, status, kill, cleanup, and the scoped ownership rules.
+---
+
+# agtop task containment
+
+agtop gives a task its own OS containment unit: a Windows Job Object, a Linux cgroup, or a process group with inherited tags. Use it when a command may outlive the turn, when you spawn a subagent, or when an intermediate shell may exit. Do not use it for short commands whose stdout you need; agtop discards output.
+
+The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `agtop_wait`, `agtop_status`, `agtop_kill`, `agtop_cleanup`, `agtop_list`, `agtop_harnesses`, and `agtop_lemonade`; other clients namespace them similarly.
+
+## Workflow
+
+1. Search for the harness if you do not know its ID:
+   - `agtop_harnesses { "query": "codex" }`
+2. Start the task with a stable task ID:
+   - `agtop_run { "command": "codex", "args": ["exec", "..."], "cwd": "/path/to/worktree", "harness": "codex", "jobId": "task-123", "peer": "my-task" }`
+3. Wait for it when you need the exit code:
+   - `agtop_wait { "jobId": "task-123", "timeoutMs": 60000 }`
+4. Inspect while it runs:
+   - `agtop_status { "jobId": "task-123", "includeProcesses": true }`
+5. Stop it when you are done:
+   - `agtop_kill { "jobId": "task-123" }`
+   - or `agtop_cleanup {}` to stop every job this session created.
+
+## Rules
+
+- Always pass a task-specific `jobId`; treat it as the task ID. Use `peer` to label the task or tenant.
+- `kill` only accepts jobs created by this MCP session. Do not try to kill other agents' jobs; use your own orchestrator for that.
+- Call `agtop_cleanup` before finishing any task that started helpers, even if you expect them to have exited.
+- If `wait` times out, the job is still running. Inspect it and decide whether to kill it; do not assume it finished.
+- Use the normal shell for commands whose output you must read. `agtop_run` uses ignored stdio.
+- agtop is lifecycle containment, not a security sandbox. It does not restrict filesystem, network, memory, or privileges.
+- If the agtop tools are unavailable, fall back to the normal shell, but explicitly track and stop the PIDs you start.
+
+## Examples
+
+Contain a dev server and a watcher, then clean up:
+
+```text
+agtop_run { "command": "npm", "args": ["run", "dev"], "cwd": "/work/app", "jobId": "task-dev-server", "peer": "task-42" }
+agtop_run { "command": "npm", "args": ["run", "watch"], "cwd": "/work/app", "jobId": "task-watcher", "peer": "task-42" }
+... work ...
+agtop_cleanup {}
+```
+
+Contain a subagent tree:
+
+```text
+agtop_run { "command": "codex", "args": ["exec", "fix the failing tests"], "cwd": "/work/app", "harness": "codex", "jobId": "task-subagent-1", "peer": "task-42" }
+agtop_wait { "jobId": "task-subagent-1", "timeoutMs": 600000 }
+agtop_status { "jobId": "task-subagent-1", "includeProcesses": true }
+```

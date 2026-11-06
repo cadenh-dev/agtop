@@ -17,6 +17,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun test
+      - run: bun run test:mcp
+      - run: bun run bench:containment
       - name: Test kernel cgroup containment on Linux
         if: runner.os == 'Linux'
         run: |
@@ -27,6 +29,12 @@ jobs:
       - run: bun run build
       - run: node dist/cli.js run -- node -e "console.log('Node smoke test')"
       - run: bun run compile
+      - name: MCP smoke test (compiled)
+        shell: bash
+        run: |
+          binary="$GITHUB_WORKSPACE/dist/agtop"
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          AGTOP_MCP_BIN="$binary" bun run test:mcp
       - name: Standalone smoke test
         shell: bash
         run: |
