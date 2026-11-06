@@ -81,13 +81,12 @@ function ownedSummary(jobId: string, job: OwnedJob) {
 async function stopOwned(): Promise<void> {
   const jobs = [...owned.values()].filter(job => job.exitCode === undefined);
   if (!jobs.length) return;
+  const started = Date.now();
   process.stderr.write(`agtop mcp: stopping ${jobs.length} owned job(s)\n`);
-  // The MCP client closes stdin, waits two seconds, then sends SIGTERM. Issue the
-  // kills immediately but do not let a slow /proc verification pass outlive that window.
-  await Promise.race([
-    Promise.allSettled(jobs.map(job => job.agent.terminate())),
-    new Promise(resolve => setTimeout(resolve, 750)),
-  ]);
+  const results = await Promise.allSettled(jobs.map(job => job.agent.terminate()));
+  const failures = results.flatMap(result => result.status === "rejected" ? [String(result.reason)] : []);
+  if (failures.length) process.stderr.write(`agtop mcp: cleanup errors: ${failures.join("; ")}\n`);
+  process.stderr.write(`agtop mcp: cleanup finished in ${Date.now() - started}ms\n`);
 }
 
 export async function startMcpServer(options: { peer?: string } = {}): Promise<void> {
