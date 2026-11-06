@@ -165,7 +165,8 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
     const rawExit = new Promise<number>((resolve, reject) => { launched.once("error", reject); launched.once("exit", (code, signal) => resolve(code ?? (signal ? 128 + (os.constants.signals[signal] || 1) : 1))); });
     // Observe errors even if setup fails before returning the public promise.
     void rawExit.catch(() => {});
-    await new Promise<void>((resolve, reject) => { launched.once("spawn", resolve); launched.once("error", reject); });
+    // Bun can miss the spawn event; a defined pid already proves the process was created.
+    if (launched.pid === undefined) await new Promise<void>((_, reject) => launched.once("error", reject));
     record.rootPid = launched.pid!;
     record.startTime = await linuxIdentity(record.rootPid) || "";
     if (!record.startTime) throw new Error("Launch process exited before containment setup.");
