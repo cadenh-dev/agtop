@@ -1,0 +1,60 @@
+name: Checks
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun test
+      - name: Test kernel cgroup containment on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir /sys/fs/cgroup/agtop-ci
+          # Migration across the runner's cgroup boundary needs ancestor permissions.
+          sudo env AGTOP_TEST_CGROUP_ROOT=/sys/fs/cgroup/agtop-ci "$(command -v bun)" test test/integration.test.ts --test-name-pattern 'delegated cgroup'
+          sudo rmdir /sys/fs/cgroup/agtop-ci
+      - run: bun run build
+      - run: node dist/cli.js run -- node -e "console.log('Node smoke test')"
+      - run: bun run compile
+      - name: Standalone smoke test
+        shell: bash
+        run: |
+          binary="$GITHUB_WORKSPACE/dist/agtop"
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          isolated=$(mktemp -d)
+          cp "$binary" "$isolated/$(basename "$binary")"
+          cd "$isolated"
+          ./$(basename "$binary") run -- node -e "console.log('Standalone smoke test')"
+  desktop:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - name: Install Linux GPUI build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libssl-dev libvulkan-dev
+      - run: bun scripts/build-desktop.ts fmt -- --check
+      - run: bun scripts/build-desktop.ts test --locked
+      - run: bun scripts/build-desktop.ts build --locked

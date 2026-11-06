@@ -1,0 +1,20 @@
+[package]
+name = "agtop-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Native GPUI desktop interface for agtop"
+
+[dependencies]
+gpui = "=0.2.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
+unicode-segmentation = "1"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true
