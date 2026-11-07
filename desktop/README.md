@@ -11,3 +11,5 @@ Run `bun run desktop:build` and `bun run desktop` from the repository root. The 
 For an externally managed backend, start `agtop daemon`, then run `agtop-desktop --port 13309 --token-file PATH`. Never put the token itself in command arguments. Network proxies and redirects are disabled for the local control API.
 
 The app uses GPUI 0.2.2 directly, without an embedded browser. See the root README for build prerequisites, controls, and containment limits.
+
+On macOS, build with Xcode and the Metal toolchain, or set `AGTOP_GPUI_RUNTIME_SHADERS=1`. Keyboard shortcuts use Cmd in place of Ctrl. Signing and notarization are deferred.

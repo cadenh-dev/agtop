@@ -5,7 +5,7 @@ description: Use agtop's MCP tools for task-scoped containment when starting lon
 
 # agtop task containment
 
-agtop gives a task its own OS containment unit: a Windows Job Object, a Linux cgroup, or a process group with inherited tags. Use it when a command may outlive the turn, when you spawn a subagent, or when an intermediate shell may exit. Do not use it for short commands whose stdout you need; agtop discards output.
+agtop gives a task its own OS containment unit: a Windows Job Object, a Linux cgroup, or a Linux or macOS process group with inherited tags. Use it when a command may outlive the turn, when you spawn a subagent, or when an intermediate shell may exit. Do not use it for short commands whose stdout you need; agtop discards output.
 
 The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `agtop_wait`, `agtop_status`, `agtop_kill`, `agtop_cleanup`, `agtop_list`, `agtop_harnesses`, and `agtop_lemonade`; other clients namespace them similarly.
 
@@ -17,7 +17,7 @@ The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `
    - `agtop_run { "command": "codex", "args": ["exec", "..."], "cwd": "/path/to/worktree", "harness": "codex", "jobId": "task-123", "peer": "my-task" }`
 3. Wait for it when you need the exit code:
    - `agtop_wait { "jobId": "task-123", "timeoutMs": 60000 }`
-4. Inspect while it runs:
+4. Inspect while it runs; `status` shows each process's role and listening ports for jobs owned by this MCP session:
    - `agtop_status { "jobId": "task-123", "includeProcesses": true }`
 5. Stop it when you are done:
    - `agtop_kill { "jobId": "task-123" }`

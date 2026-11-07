@@ -18,6 +18,9 @@ pub const ROLE_ORDER: &[&str] = &[
 ];
 
 pub fn role_label(role: &str) -> &str {
+    if role.is_empty() {
+        return "";
+    }
     match role {
         "agent" => "Agent",
         "subagent" => "Subagent",
@@ -31,7 +34,8 @@ pub fn role_label(role: &str) -> &str {
         "git" => "Version control",
         "browser" => "Browser",
         "shell" => "Shell",
-        _ => "Tool",
+        "tool" => "Tool",
+        _ => role,
     }
 }
 
@@ -117,11 +121,13 @@ impl Agent {
             self.backend,
             self.role_counts
                 .keys()
+                .filter(|role| !role.is_empty())
                 .map(|role| format!("{} {}", role, role_label(role)))
                 .collect::<Vec<_>>()
                 .join(" "),
             self.processes
                 .iter()
+                .filter(|p| !p.role.is_empty())
                 .map(|p| format!("{} {}", p.role, role_label(&p.role)))
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -360,5 +366,14 @@ mod tests {
         agent.role_counts.insert("dev-server".into(), 1);
         assert!(agent.matches("dev-server"));
         assert!(agent.matches("Dev server"));
+    }
+
+    #[test]
+    fn role_labels_preserve_unknown_ids_and_empty_roles_do_not_match_tool() {
+        assert_eq!(super::role_label(""), "");
+        assert_eq!(super::role_label("future-role"), "future-role");
+        let mut agent = Agent::default();
+        agent.processes.push(Process::default());
+        assert!(!agent.matches("tool"));
     }
 }

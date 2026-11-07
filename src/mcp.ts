@@ -10,6 +10,24 @@ import type { AgentProcessTree, HarnessType, ManagedAgent } from "./types.js";
 
 const VERSION = "0.1.0";
 
+export function formatListeningEndpoint(address: string, port: number): string {
+  return address.includes(":") ? `[${address}]:${port}` : `${address}:${port}`;
+}
+
+export function cleanupResults<T>(
+  jobs: Array<{ jobId: string; alreadyExited?: boolean; exitCode?: number }>,
+  settled: PromiseSettledResult<T>[],
+): Array<Record<string, unknown>> {
+  let activeIndex = 0;
+  return jobs.map(({ jobId, alreadyExited, exitCode }) => {
+    if (alreadyExited) return { jobId, alreadyExited: true, exitCode };
+    const result = settled[activeIndex++];
+    if (!result) return { jobId, error: "Missing termination result" };
+    if (result.status === "rejected") return { jobId, error: result.reason instanceof Error ? result.reason.message : String(result.reason) };
+    return { jobId, ...(result.value as object) };
+  });
+}
+
 interface OwnedJob {
   agent: ManagedAgent;
   harness: HarnessType;
@@ -143,7 +161,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
           pid: p.pid, ppid: p.ppid, name: p.name, cmdline: p.cmdline,
           cpuPercent: Number(p.cpuPercent.toFixed(1)), memoryMb: Number(p.memoryMb.toFixed(1)),
           role: p.role, roleEvidence: p.roleEvidence,
-          listening: (p.listeningSockets ?? []).map(socket => `${socket.address}:${socket.port}`),
+          listening: (p.listeningSockets ?? []).map(socket => formatListeningEndpoint(socket.address, socket.port)),
         }));
       } else if (includeProcesses) {
         value.note = "Process details are only available for jobs created by this MCP session.";
@@ -265,13 +283,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
     const jobs = [...owned.entries()].map(([jobId, job]) => ({ jobId, job, alreadyExited: job.exitCode !== undefined, exitCode: job.exitCode }));
     const active = jobs.filter(item => !item.alreadyExited);
     const settled = await Promise.allSettled(active.map(item => item.job.agent.terminate()));
-    let activeIndex = 0;
-    const results = jobs.map(({ jobId, job, alreadyExited, exitCode }): Record<string, unknown> => {
-      if (alreadyExited) return { jobId, alreadyExited: true, exitCode };
-      const result = settled[activeIndex++];
-      if (result.status === "rejected") return { jobId, error: result.reason instanceof Error ? result.reason.message : String(result.reason) };
-      return { jobId, ...result.value };
-    });
+    const results = cleanupResults(jobs, settled);
     pruneStaleJobs();
     return text({ jobs: results });
   });

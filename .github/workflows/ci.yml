@@ -6,11 +6,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        include:
-          - os: macos-latest
-            experimental: true
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -34,6 +30,9 @@ jobs:
       - run: bun run build
       - run: node dist/cli.js run -- node -e "console.log('Node smoke test')"
       - run: bun run compile
+      - name: Verify macOS executable signature
+        if: runner.os == 'macOS'
+        run: codesign --verify dist/agtop || { codesign --force --sign - dist/agtop; codesign --verify dist/agtop; }
       - name: MCP smoke test (compiled)
         shell: bash
         run: |
@@ -53,9 +52,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          if [ -f test/posix-crash.test.ts ]; then
-            AGTOP_TEST_BIN="$GITHUB_WORKSPACE/dist/agtop" bun test test/posix-crash.test.ts
-          fi
+          AGTOP_TEST_BIN="$GITHUB_WORKSPACE/dist/agtop" bun test test/posix-crash.test.ts
   desktop:
     strategy:
       fail-fast: false

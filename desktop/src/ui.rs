@@ -116,6 +116,13 @@ impl Workbench {
                         self.confirm = None;
                     }
                     self.agents = agents;
+                    if self
+                        .role_filter
+                        .as_deref()
+                        .is_some_and(|role| !keep_role_filter(&self.agents, Some(role)))
+                    {
+                        self.role_filter = None;
+                    }
                     self.last_success = Some(Instant::now());
                 }
                 Event::Harnesses(catalog) => {
@@ -273,7 +280,7 @@ impl Workbench {
                     .iter()
                     .map(|agent| agent.role_counts.get(*role).copied().unwrap_or(0))
                     .sum();
-                (count > 0).then_some((*role, count))
+                (count > 0 || self.role_filter.as_deref() == Some(role)).then_some((*role, count))
             })
             .collect::<Vec<_>>();
         div()
@@ -311,6 +318,9 @@ impl Workbench {
                         self.filter == index as u8,
                         move |this, _, cx| {
                             this.filter = index as u8;
+                            if index == 0 {
+                                this.role_filter = None;
+                            }
                             this.form = None;
                             cx.notify();
                         },
@@ -320,11 +330,11 @@ impl Workbench {
                 }),
             )
             .child(Self::caption("Roles").mt_3())
-            .children(roles.drain(..).enumerate().map(|(index, (role, count))| {
+            .children(roles.drain(..).map(|(role, count)| {
                 let role_id = role.to_owned();
                 let active = self.role_filter.as_deref() == Some(role);
                 Self::action(
-                    ("role-nav", index),
+                    role,
                     format!("{}   {}", crate::model::role_label(role), count),
                     active,
                     move |this, _, cx| {
@@ -736,9 +746,13 @@ impl Workbench {
                                                 .id(("role", p.pid))
                                                 .w(px(120.))
                                                 .text_color(color(role_color))
-                                                .tooltip(move |_, cx| {
-                                                    cx.new(|_| RoleTooltip(evidence.clone().into()))
+                                                .when(!evidence.is_empty(), |this| {
+                                                    this.tooltip(move |_, cx| {
+                                                        cx.new(|_| {
+                                                            RoleTooltip(evidence.clone().into())
+                                                        })
                                                         .into()
+                                                    })
                                                 })
                                                 .child(p.role.clone()),
                                         )
@@ -827,6 +841,10 @@ fn filtered_agents<'a>(
                 && role.map_or(true, |role| agent.has_role(role))
         })
         .collect()
+}
+
+fn keep_role_filter(agents: &[Agent], role: Option<&str>) -> bool {
+    role.is_none_or(|role| agents.iter().any(|agent| agent.has_role(role)))
 }
 
 struct RoleTooltip(SharedString);
@@ -1093,8 +1111,8 @@ pub fn init(cx: &mut App) {
 mod tests {
     use super::{
         NEW_AGENT_SHORTCUT, QUIT_SHORTCUT, REFRESH_SHORTCUT, WorkbenchAction, cancel_confirmation,
-        fallback_harnesses, filtered_agents, matching_harnesses, refreshed_selection, request_stop,
-        shortcut_action, validate_launch_arguments,
+        fallback_harnesses, filtered_agents, keep_role_filter, matching_harnesses,
+        refreshed_selection, request_stop, shortcut_action, validate_launch_arguments,
     };
     use crate::model::{Agent, ROLE_ORDER, role_label};
 
@@ -1147,6 +1165,35 @@ mod tests {
             filtered_agents(&agents, "", 0, Some("dev-server"))[0].job_id,
             "job-1"
         );
+    }
+
+    #[test]
+    fn role_filter_is_cleared_when_snapshot_loses_the_role() {
+        let mut value = agent("job-1", "codex", "main", 100);
+        value.role_counts.insert("test-runner".into(), 1);
+        assert!(keep_role_filter(
+            std::slice::from_ref(&value),
+            Some("test-runner")
+        ));
+        value.role_counts.clear();
+        assert!(!keep_role_filter(&[value], Some("test-runner")));
+        assert!(keep_role_filter(&[], None));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_shortcuts_use_ctrl() {
+        assert_eq!(NEW_AGENT_SHORTCUT, "ctrl-n");
+        assert_eq!(REFRESH_SHORTCUT, "ctrl-r");
+        assert_eq!(QUIT_SHORTCUT, "ctrl-q");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_shortcuts_use_cmd() {
+        assert_eq!(NEW_AGENT_SHORTCUT, "cmd-n");
+        assert_eq!(REFRESH_SHORTCUT, "cmd-r");
+        assert_eq!(QUIT_SHORTCUT, "cmd-q");
     }
 
     #[test]

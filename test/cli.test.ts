@@ -176,6 +176,9 @@ describe("agtop CLI subprocess", () => {
     expect(matching.code).toBe(0);
     expect(matching.stdout).toContain("mcp-server");
     expect(matching.stdout).not.toContain("dev-server");
+    const matchingJson = await runCli(["roles", "mcp", "--json"]);
+    expect(matchingJson.code).toBe(0);
+    expect((JSON.parse(matchingJson.stdout) as Array<{ role: string }>).map(item => item.role)).toEqual(["mcp-server"]);
   });
 
   test("bare agtop with redirected stdout prints a snapshot and exits", async () => {

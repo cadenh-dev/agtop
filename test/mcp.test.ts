@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
+import { cleanupResults, formatListeningEndpoint } from "../src/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { killByMarker } from "../scripts/process-probe.js";
@@ -65,6 +66,24 @@ interface KillBody {
   errors?: string[];
 }
 interface CleanupBody { jobs: Array<{ jobId: string }>; }
+
+test("listening endpoints bracket IPv6 addresses", () => {
+  expect(formatListeningEndpoint("127.0.0.1", 8080)).toBe("127.0.0.1:8080");
+  expect(formatListeningEndpoint("::1", 8080)).toBe("[::1]:8080");
+});
+
+test("cleanup reports a rejected termination and keeps successful results", () => {
+  expect(cleanupResults(
+    [{ jobId: "bad" }, { jobId: "good" }],
+    [
+      { status: "rejected", reason: new Error("terminate failed") },
+      { status: "fulfilled", value: { killedPids: [42], failedPids: [], errors: [] } },
+    ],
+  )).toEqual([
+    { jobId: "bad", error: "terminate failed" },
+    { jobId: "good", killedPids: [42], failedPids: [], errors: [] },
+  ]);
+});
 interface HarnessBody { harnesses: Array<{ id: string }>; }
 
 function childEnv(): Record<string, string> {
