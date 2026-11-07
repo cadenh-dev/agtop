@@ -215,4 +215,10 @@ describe("negative and ambiguous cases", () => {
     reject({ name: "python", cmdline: "python -m" });
     reject({ name: "---", cmdline: "--- weird" });
   });
+
+  test("distinguishes macOS Codex.app and Claude.app executables from agent CLIs", () => {
+    expect(detectHarness({ name: "/Applications/Codex.app/Contents/MacOS/Codex", cmdline: "", argv: ["/Applications/Codex.app/Contents/MacOS/Codex"] })).toBeUndefined();
+    expect(detectHarness({ name: "codex app-server", cmdline: "", argv: ["/Applications/Codex.app/Contents/Resources/codex", "app-server"] })).toBe("codex");
+    expect(detectHarness({ name: "/Applications/Claude.app/Contents/MacOS/Claude", cmdline: "", argv: ["/Applications/Claude.app/Contents/MacOS/Claude"] })).toBeUndefined();
+  });
 });

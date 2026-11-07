@@ -2,7 +2,7 @@ import * as os from "node:os";
 import { backendFor } from "./backend.js";
 import { detectHarness, harnesses, isLocalHarness } from "./discovery.js";
 import { resolveGitWorktree } from "./git.js";
-import type { AgentProcessTree, HarnessType, JobRecord, RawOsProcess } from "./types.js";
+import type { AgentProcess, AgentProcessTree, HarnessType, JobRecord, ProcessRole, RawOsProcess } from "./types.js";
 
 export function correlateTrees(processes: RawOsProcess[], jobs: JobRecord[], members: Map<string, number[]> = new Map()): AgentProcessTree[] {
   const byPid = new Map(processes.map(p => [p.pid, p]));
@@ -34,7 +34,9 @@ export function correlateTrees(processes: RawOsProcess[], jobs: JobRecord[], mem
     const root = byPid.get(rootPid) || procs[0];
     const detected = backendFor(procs, isLocalHarness(harness));
     const backend = record?.backend && record.backend !== "unknown" ? record.backend : detected.backend;
-    trees.push({ jobId, harness, rootPid, processes: procs, backend,
+    const agentProcesses: AgentProcess[] = procs.map(p => ({ ...p, role: "tool", roleSource: "fallback", roleEvidence: "role classification unavailable" }));
+    const roleCounts: Partial<Record<ProcessRole, number>> = agentProcesses.length ? { tool: agentProcesses.length } : {};
+    trees.push({ jobId, harness, rootPid, processes: agentProcesses, roleCounts, backend,
       backendEvidence: backend === record?.backend && backend !== "unknown" ? "Recorded launch configuration" : detected.evidence,
       userOrPeer: record?.peer || root.envTags?.AGTOP_PEER || os.userInfo().username,
       git: resolveGitWorktree(record?.cwd || root.envTags?.AGTOP_WORKTREE || root.cwd),

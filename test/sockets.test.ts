@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { attributeTcpRows, isLoopback, parseProcNetTcp, parseWindowsTcpTable } from "../src/sockets.js";
+import { attributeTcpRows, collectSocketConnections, formatIpv6, isLoopback, listenersByPid, parseProcNetTcp, parseWindowsTcpTable } from "../src/sockets.js";
 import { backendFor } from "../src/backend.js";
 import type { RawOsProcess } from "../src/types.js";
 
@@ -50,5 +50,44 @@ describe("socket attribution fixtures", () => {
 
   test("permission-like missing socket data stays unknown", () => {
     expect(backendFor([proc(123, "node")])).toEqual({ backend: "unknown", evidence: "No observable endpoint configuration or local socket" });
+  });
+
+  test("attaches Linux listener rows to their owning process", async () => {
+    const processes = [proc(99, "node")];
+    const rows = parseProcNetTcp(procTcp).map(row => ({ ...row, state: row.state === 10 ? 2 : row.state, pid: 99 }));
+    expect(listenersByPid(rows).get(99)).toEqual([{ address: "127.0.0.1", port: 11434 }]);
+    // Verify the snapshot collection path using the public Linux fixture parser and listener mapper.
+    processes[0].listeningSockets = listenersByPid(rows).get(99);
+    expect(processes[0].listeningSockets).toEqual([{ address: "127.0.0.1", port: 11434 }]);
+  });
+
+  test("formats and attaches Windows IPv4 and IPv6 listener rows", () => {
+    const rows = [
+      { pid: 7, state: 2, localAddress: "0.0.0.0", localPort: 3000, remoteAddress: "0.0.0.0", remotePort: 0 },
+      { pid: 7, state: 2, localAddress: "0:0:0:0:0:0:0:0", localPort: 3001, remoteAddress: "0:0:0:0:0:0:0:0", remotePort: 0 },
+      { pid: 7, state: 2, localAddress: "0:0:0:0:0:0:0:1", localPort: 3002, remoteAddress: "0:0:0:0:0:0:0:0", remotePort: 0 },
+    ];
+    expect(listenersByPid(rows).get(7)).toEqual([
+      { address: "0.0.0.0", port: 3000 }, { address: "::", port: 3001 }, { address: "::1", port: 3002 },
+    ]);
+  });
+
+  test("deduplicates identical listeners", () => {
+    const row = { pid: 8, state: 2, localAddress: "127.0.0.1", localPort: 8080, remoteAddress: "0.0.0.0", remotePort: 0 };
+    expect(listenersByPid([row, row]).get(8)).toEqual([{ address: "127.0.0.1", port: 8080 }]);
+  });
+
+  test("preserves exact IPv6 formatting for loopback, wildcard and v4-mapped addresses", () => {
+    expect(formatIpv6(Buffer.from("00000000000000000000000000000001", "hex"))).toBe("0:0:0:0:0:0:0:1");
+    expect(formatIpv6(Buffer.from("00000000000000000000000000000000", "hex"))).toBe("0:0:0:0:0:0:0:0");
+    expect(formatIpv6(Buffer.from("00000000000000000000ffff7f000001", "hex"))).toBe("::ffff:127.0.0.1");
+  });
+
+  test("does not fetch or attach socket rows for another platform", async () => {
+    const processes = [proc(42, "node")];
+    const other = process.platform === "win32" ? "linux" : "win32";
+    await collectSocketConnections(processes, other);
+    expect(processes[0]).not.toHaveProperty("socketConnections");
+    expect(processes[0]).not.toHaveProperty("listeningSockets");
   });
 });

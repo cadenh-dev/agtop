@@ -11,20 +11,36 @@ export type HarnessType =
   | "mistralrs" | "xinference" | "llamafile" | "mlx-lm" | "openllm"
   | "custom";
 export type Backend = "amd-lemonade-local" | "cloud-api" | "local-engine" | "unknown";
-export type ContainmentMode = "linux-cgroup" | "linux-env-pgid" | "win32-job-object" | "passive-ppid";
+export type ProcessRole =
+  | "agent" | "subagent" | "mcp-server" | "inference-server" | "dev-server" | "language-server"
+  | "test-runner" | "build" | "package-manager" | "git" | "browser" | "shell" | "tool";
+/** Which signal produced a role. */
+export type RoleSource = "job" | "harness" | "catalog" | "socket" | "inherited" | "fallback";
+export interface ListeningSocket { address: string; port: number }
+export interface AgentProcess extends RawOsProcess {
+  role: ProcessRole;
+  roleSource: RoleSource;
+  /** Built only from catalog literals, PIDs, harness/job IDs and socket endpoints. Never raw argv or cwd. */
+  roleEvidence: string;
+}
+export type ContainmentMode = "linux-cgroup" | "linux-env-pgid" | "darwin-env-pgid" | "win32-job-object" | "passive-ppid";
 export interface RawOsProcess {
   pid: number; ppid: number; name: string; cmdline: string; argv?: string[];
   startTime: string; cpuSeconds: number; cpuPercent: number; memoryMb: number;
   cwd?: string; pgid?: number; envTags?: Record<string, string>; cgroup?: string; state?: string;
   /** Local inference endpoint connections observed in this snapshot. */
   socketConnections?: SocketConnection[];
+  /** TCP sockets this process is listening on, from the same socket snapshot as socketConnections. */
+  listeningSockets?: ListeningSocket[];
 }
 export interface SocketConnection { address: string; port: number; serverPid?: number; serverHarness?: HarnessType }
 export interface GitWorktreeInfo { repoRoot: string; branch: string; isWorktree: boolean; gitDir: string; commonDir: string }
 export interface AgentProcessTree {
   jobId: string; harness: HarnessType; backend: Backend; backendEvidence: string;
   userOrPeer: string; rootPid: number; git?: GitWorktreeInfo; containmentMode: ContainmentMode;
-  totalCpuPercent: number; totalMemoryMb: number; processes: RawOsProcess[];
+  totalCpuPercent: number; totalMemoryMb: number; processes: AgentProcess[];
+  /** Count of processes per role in this tree; roles with zero processes are omitted. */
+  roleCounts: Partial<Record<ProcessRole, number>>;
 }
 export interface SpawnAgentOptions {
   jobId?: string; harness: HarnessType; command: string; args?: string[]; cwd?: string;

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import koffi from "koffi";
 import { detectHarness, harnessKind } from "./harnesses.js";
-import type { RawOsProcess, SocketConnection } from "./types.js";
+import type { ListeningSocket, RawOsProcess, SocketConnection } from "./types.js";
 
 export interface TcpRow { pid: number; state: number; localAddress: string; localPort: number; remoteAddress: string; remotePort: number }
 export interface ProcSocketRow { localAddress: string; localPort: number; remoteAddress: string; remotePort: number; state: number; inode: string }
@@ -43,6 +43,27 @@ export function isLoopback(address: string): boolean {
 }
 function addressText(address: string): string { return address === "0:0:0:0:0:0:0:1" ? "::1" : address; }
 function isWildcard(address: string): boolean { return address === "0.0.0.0" || address === "::" || address === "0:0:0:0:0:0:0:0"; }
+
+export function formatIpv4(bytes: Uint8Array): string { return [...bytes].join("."); }
+export function formatIpv6(bytes: Uint8Array): string {
+  const words = Array.from({ length: 8 }, (_, i) => ((bytes[i * 2] << 8) | bytes[i * 2 + 1]).toString(16));
+  if (words.slice(0, 5).every(word => word === "0") && words[5] === "ffff") return `::ffff:${formatIpv4(bytes.subarray(12, 16))}`;
+  return words.join(":");
+}
+
+export function listenersByPid(rows: TcpRow[]): Map<number, ListeningSocket[]> {
+  const result = new Map<number, ListeningSocket[]>();
+  for (const row of rows) {
+    if (row.state !== 2) continue;
+    const address = row.localAddress === "0:0:0:0:0:0:0:1" ? "::1"
+      : row.localAddress === "0:0:0:0:0:0:0:0" ? "::" : row.localAddress;
+    const sockets = result.get(row.pid) || [];
+    if (!sockets.some(socket => socket.address === address && socket.port === row.localPort)) sockets.push({ address, port: row.localPort });
+    result.set(row.pid, sockets);
+  }
+  for (const sockets of result.values()) sockets.sort((a, b) => a.port - b.port || a.address.localeCompare(b.address));
+  return result;
+}
 
 export function attributeTcpRows(rows: TcpRow[], processes: RawOsProcess[]): Map<number, SocketConnection[]> {
   const byPid = new Map(processes.map(p => [p.pid, p]));
@@ -102,12 +123,7 @@ function windowsRows(): TcpRow[] {
 export function parseWindowsTcpTable(data: Buffer, family: 2 | 23): TcpRow[] {
   if (data.length < 4) return [];
   const count = data.readUInt32LE(0), rowSize = family === 2 ? 24 : 56;
-  const address = (bytes: Buffer) => {
-    if (family === 2) return [...bytes].join(".");
-    const words = Array.from({ length: 8 }, (_, i) => bytes.readUInt16BE(i * 2).toString(16));
-    if (words.slice(0, 5).every(word => word === "0") && words[5] === "ffff") return `::ffff:${[...bytes.subarray(12, 16)].join(".")}`;
-    return words.join(":");
-  };
+  const address = (bytes: Buffer) => family === 2 ? formatIpv4(bytes) : formatIpv6(bytes);
   return Array.from({ length: Math.min(count, Math.floor((data.length - 4) / rowSize)) }, (_, i) => {
     const offset = 4 + i * rowSize;
     if (family === 2) return { state: data.readUInt32LE(offset), localAddress: address(data.subarray(offset + 4, offset + 8)), localPort: data.readUInt16BE(offset + 8), remoteAddress: address(data.subarray(offset + 12, offset + 16)), remotePort: data.readUInt16BE(offset + 16), pid: data.readUInt32LE(offset + 20) };
@@ -116,12 +132,17 @@ export function parseWindowsTcpTable(data: Buffer, family: 2 | 23): TcpRow[] {
 }
 
 /** Attach one socket snapshot to the process snapshot. Errors only omit socket evidence. */
-export async function collectSocketConnections(processes: RawOsProcess[]): Promise<void> {
+export async function collectSocketConnections(processes: RawOsProcess[], platform: NodeJS.Platform = process.platform): Promise<void> {
   try {
-    const rows = process.platform === "linux" ? await linuxRows() : process.platform === "win32" ? windowsRows() : [];
+    const rows = platform !== process.platform ? [] : platform === "linux" ? await linuxRows() : platform === "win32" ? windowsRows() : [];
+    const byPid = new Map(processes.map(proc => [proc.pid, proc]));
     for (const [pid, connections] of attributeTcpRows(rows, processes)) {
-      const proc = processes.find(p => p.pid === pid);
+      const proc = byPid.get(pid);
       if (proc) proc.socketConnections = connections;
+    }
+    for (const [pid, sockets] of listenersByPid(rows)) {
+      const proc = byPid.get(pid);
+      if (proc && sockets.length) proc.listeningSockets = sockets;
     }
   } catch { /* Permission denied and transient procfs/API errors degrade to unknown. */ }
 }
