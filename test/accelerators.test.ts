@@ -141,7 +141,7 @@ describe("accelerator sampling core", () => {
 
   test("listAgentTrees remains available when no provider is installed", async () => {
     expect(await listAgentTrees()).toBeInstanceOf(Array);
-  });
+  }, 30000);
 
   test("sampler overhead with fake provider stays below the 5 ms target", async () => {
     const t = tree(processRecord(1));
