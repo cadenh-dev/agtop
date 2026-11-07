@@ -28,6 +28,7 @@ export interface RawOsProcess {
   pid: number; ppid: number; name: string; cmdline: string; argv?: string[];
   startTime: string; cpuSeconds: number; cpuPercent: number; memoryMb: number;
   cwd?: string; pgid?: number; envTags?: Record<string, string>; cgroup?: string; state?: string;
+  accelerators?: AcceleratorUsage[];
   /** Local inference endpoint connections observed in this snapshot. */
   socketConnections?: SocketConnection[];
   /** TCP sockets this process is listening on, from the same socket snapshot as socketConnections. */
@@ -39,8 +40,41 @@ export interface AgentProcessTree {
   jobId: string; harness: HarnessType; backend: Backend; backendEvidence: string;
   userOrPeer: string; rootPid: number; git?: GitWorktreeInfo; containmentMode: ContainmentMode;
   totalCpuPercent: number; totalMemoryMb: number; processes: AgentProcess[];
+  gpuPercent?: number;
+  npuPercent?: number;
+  gpuMemoryMb?: number;
   /** Count of processes per role in this tree; roles with zero processes are omitted. */
   roleCounts: Partial<Record<ProcessRole, number>>;
+}
+export type AcceleratorKind = "gpu" | "npu";
+/** One accelerator device as seen by agtop. `id` is stable for the life of the device. */
+export interface AcceleratorDevice {
+  id: string;
+  kind: AcceleratorKind;
+  name?: string;
+  vendor?: string;
+  utilizationPercent?: number;
+}
+/** Usage of one device by one process over the last sampling interval. */
+export interface AcceleratorUsage {
+  deviceId: string;
+  kind: AcceleratorKind;
+  utilizationPercent?: number;
+  engine?: string;
+  memoryBytes?: number;
+}
+export type AcceleratorSource = "windows-pdh" | "linux-drm-fdinfo" | "nvml" | "darwin-iokit" | "none";
+export interface AcceleratorStatus {
+  source: AcceleratorSource;
+  kind: AcceleratorKind | "any";
+  available: boolean;
+  reason?: string;
+  message?: string;
+}
+export interface AcceleratorSnapshot {
+  devices: AcceleratorDevice[];
+  status: AcceleratorStatus[];
+  sampledAt: number;
 }
 export interface SpawnAgentOptions {
   jobId?: string; harness: HarnessType; command: string; args?: string[]; cwd?: string;
