@@ -10,7 +10,10 @@ export function correlateTrees(processes: RawOsProcess[], jobs: JobRecord[], mem
   for (const p of processes) {
     const parent = byPid.get(p.ppid);
     // A parent PID can have been reused since its child was born.
-    if (parent && BigInt(parent.startTime) > BigInt(p.startTime)) continue;
+    const parentStart = parent?.startTime;
+    const childStart = p.startTime;
+    if (parent && parentStart && childStart && /^\d+$/.test(parentStart) && /^\d+$/.test(childStart)
+      && parentStart !== "0" && childStart !== "0" && BigInt(parentStart) > BigInt(childStart)) continue;
     children.set(p.ppid, [...(children.get(p.ppid) || []), p]);
   }
   const assigned = new Set<number>();
@@ -38,7 +41,9 @@ export function correlateTrees(processes: RawOsProcess[], jobs: JobRecord[], mem
       containmentMode: record?.mode || "passive-ppid",
       totalCpuPercent: procs.reduce((sum, p) => sum + p.cpuPercent, 0), totalMemoryMb: procs.reduce((sum, p) => sum + p.memoryMb, 0) });
   };
-  for (const job of jobs) {
+  // More specific (smaller) memberships own overlapping processes first.
+  const orderedJobs = [...jobs].sort((a, b) => (members.get(a.jobId)?.length ?? Number.MAX_SAFE_INTEGER) - (members.get(b.jobId)?.length ?? Number.MAX_SAFE_INTEGER));
+  for (const job of orderedJobs) {
     const ids = members.get(job.jobId);
     const procs = ids ? ids.map(id => byPid.get(id)).filter((p): p is RawOsProcess => !!p) : [];
     add(job.jobId, job.harness, job.rootPid, procs, job);
