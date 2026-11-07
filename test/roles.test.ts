@@ -353,7 +353,7 @@ describe("role classifier structure and cost", () => {
       { address: "127.0.0.1", port: 5000 }, { address: "::1", port: 3000 },
     ] } });
     expect(classifyTreeRoles(listener.tree).get(listener.pid)).toEqual({
-      role: "dev-server", source: "socket", evidence: "socket: listening ::1:3000",
+      role: "dev-server", source: "socket", evidence: "socket: listening [::1]:3000",
     });
   });
 });

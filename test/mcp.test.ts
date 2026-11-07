@@ -71,6 +71,8 @@ interface CleanupBody { jobs: Array<{ jobId: string }>; }
 test("listening endpoints bracket IPv6 addresses", () => {
   expect(formatListeningEndpoint("127.0.0.1", 8080)).toBe("127.0.0.1:8080");
   expect(formatListeningEndpoint("::1", 8080)).toBe("[::1]:8080");
+  expect(formatListeningEndpoint("::", 3000)).toBe("[::]:3000");
+  expect(formatListeningEndpoint("::ffff:127.0.0.1", 3000)).toBe("[::ffff:127.0.0.1]:3000");
 });
 
 test("cleanup reports a rejected termination and keeps successful results", () => {

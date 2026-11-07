@@ -1,5 +1,6 @@
 import { base, detectHarness, harnessKind, harnesses, normalize } from "./harnesses.js";
 import type { HarnessType, ProcessRole, RawOsProcess, RoleSource } from "./types.js";
+import { formatEndpoint } from "./net-format.js";
 
 export interface CommandAnchor {
   name: string;
@@ -559,7 +560,7 @@ export function classifyTreeRoles(tree: RoleTreeInput): Map<number, RoleAssignme
   const assignSocket = (p: RawOsProcess): RoleAssignment | undefined => {
     if (!p.listeningSockets?.length) return undefined;
     const socket = [...p.listeningSockets].sort((a, b) => a.port - b.port || a.address.localeCompare(b.address))[0];
-    return assign(p, "dev-server", "socket", `socket: listening ${socket.address}:${socket.port}`);
+    return assign(p, "dev-server", "socket", `socket: listening ${formatEndpoint(socket.address, socket.port)}`);
   };
 
   for (const p of ordered) {

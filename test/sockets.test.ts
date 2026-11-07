@@ -25,7 +25,7 @@ describe("socket attribution fixtures", () => {
     const processes = [proc(20, "node")];
     const connections = attributeTcpRows(parsed, processes).get(20)!;
     expect(connections).toEqual([{ address: "::1", port: 13000 }]);
-    expect(backendFor([{ ...processes[0], socketConnections: connections }])).toMatchObject({ backend: "unknown", evidence: "socket: pid 20 -> ::1:13000 (unrecognised listener)" });
+    expect(backendFor([{ ...processes[0], socketConnections: connections }])).toMatchObject({ backend: "unknown", evidence: "socket: pid 20 -> [::1]:13000 (unrecognised listener)" });
   });
 
   test("decodes Windows IPv4 and IPv6 owner PID table fixture rows", () => {
