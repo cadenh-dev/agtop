@@ -320,11 +320,11 @@ impl Workbench {
                 }),
             )
             .child(Self::caption("Roles").mt_3())
-            .children(roles.drain(..).map(|(role, count)| {
+            .children(roles.drain(..).enumerate().map(|(index, (role, count))| {
                 let role_id = role.to_owned();
                 let active = self.role_filter.as_deref() == Some(role);
                 Self::action(
-                    ("role-nav", role),
+                    ("role-nav", index),
                     format!("{}   {}", crate::model::role_label(role), count),
                     active,
                     move |this, _, cx| {
@@ -733,10 +733,12 @@ impl Workbench {
                                         )
                                         .child(
                                             div()
+                                                .id(("role", p.pid))
                                                 .w(px(120.))
                                                 .text_color(color(role_color))
                                                 .tooltip(move |_, cx| {
-                                                    cx.new(|_| RoleTooltip(evidence.clone())).into()
+                                                    cx.new(|_| RoleTooltip(evidence.clone().into()))
+                                                        .into()
                                                 })
                                                 .child(p.role.clone()),
                                         )
