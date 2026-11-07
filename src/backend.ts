@@ -1,4 +1,5 @@
 import type { Backend, RawOsProcess } from "./types.js";
+import { formatEndpoint } from "./net-format.js";
 
 export function backendFor(processes: RawOsProcess[], localEngine = false): { backend: Backend; evidence: string } {
   for (const p of processes) {
@@ -7,7 +8,7 @@ export function backendFor(processes: RawOsProcess[], localEngine = false): { ba
   let unknownSocket: string | undefined;
   for (const p of processes) {
     for (const connection of p.socketConnections || []) {
-      const endpoint = `${connection.address}:${connection.port}`;
+      const endpoint = formatEndpoint(connection.address, connection.port);
       if (connection.port === 13305) return { backend: "amd-lemonade-local", evidence: `socket: pid ${p.pid} -> ${endpoint} (Lemonade port 13305)` };
       if (connection.serverHarness && connection.serverPid) return { backend: "local-engine", evidence: `socket: pid ${p.pid} -> ${endpoint} (${connection.serverHarness}, pid ${connection.serverPid})` };
       unknownSocket ??= `socket: pid ${p.pid} -> ${endpoint} (unrecognised listener)`;
