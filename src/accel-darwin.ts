@@ -83,7 +83,7 @@ export function decodeCFValue(value: unknown, access: CFValueAccess): CFPlainVal
   return decode(value, 0);
 }
 
-export type DarwinIOObject = unknown;
+export type DarwinIOObject = number;
 
 /** Native boundary used by the provider and replaceable with a plain fake in tests. */
 export interface DarwinIOKitLayer {
@@ -98,7 +98,7 @@ export interface DarwinIOKitLayer {
   releaseCFObject(value: unknown): void;
 }
 
-function isNullHandle(value: unknown): boolean {
+function isNullHandle(value: unknown): value is null | undefined | 0 | 0n {
   return value === undefined || value === null || value === 0 || value === 0n;
 }
 
@@ -313,13 +313,13 @@ async function loadDarwinIOKit(): Promise<DarwinIOKitLayer> {
   const cf = runtime.load(CORE_FOUNDATION_PATH);
 
   const IOServiceMatching = iokit.func("void * IOServiceMatching(const char *name)");
-  const IOServiceGetMatchingServices = iokit.func("int IOServiceGetMatchingServices(uint32_t mainPort, void *matching, void **existing)");
-  const IOIteratorNext = iokit.func("void * IOIteratorNext(void *iterator)");
-  const IOObjectRelease = iokit.func("int IOObjectRelease(void *object)");
-  const IORegistryEntryGetChildIterator = iokit.func("int IORegistryEntryGetChildIterator(void *entry, const char *plane, void **iterator)");
-  const IORegistryEntryCreateCFProperty = iokit.func("void * IORegistryEntryCreateCFProperty(void *entry, void *key, void *allocator, uint32_t options)");
-  const IORegistryEntryGetRegistryEntryID = iokit.func("int IORegistryEntryGetRegistryEntryID(void *entry, uint64_t *entryID)");
-  const IORegistryEntryGetParentEntry = iokit.func("int IORegistryEntryGetParentEntry(void *entry, const char *plane, void **parent)");
+  const IOServiceGetMatchingServices = iokit.func("int IOServiceGetMatchingServices(uint32_t mainPort, void *matching, uint32_t *existing)");
+  const IOIteratorNext = iokit.func("uint32_t IOIteratorNext(uint32_t iterator)");
+  const IOObjectRelease = iokit.func("int IOObjectRelease(uint32_t object)");
+  const IORegistryEntryGetChildIterator = iokit.func("int IORegistryEntryGetChildIterator(uint32_t entry, const char *plane, uint32_t *iterator)");
+  const IORegistryEntryCreateCFProperty = iokit.func("void * IORegistryEntryCreateCFProperty(uint32_t entry, void *key, void *allocator, uint32_t options)");
+  const IORegistryEntryGetRegistryEntryID = iokit.func("int IORegistryEntryGetRegistryEntryID(uint32_t entry, uint64_t *entryID)");
+  const IORegistryEntryGetParentEntry = iokit.func("int IORegistryEntryGetParentEntry(uint32_t entry, const char *plane, uint32_t *parent)");
 
   const CFStringCreateWithCString = cf.func("void * CFStringCreateWithCString(void *allocator, const char *text, uint32_t encoding)");
   const CFGetTypeID = cf.func("uint64_t CFGetTypeID(void *value)");
@@ -327,8 +327,8 @@ async function loadDarwinIOKit(): Promise<DarwinIOKitLayer> {
   const CFNumberGetTypeID = cf.func("uint64_t CFNumberGetTypeID(void)");
   const CFArrayGetTypeID = cf.func("uint64_t CFArrayGetTypeID(void)");
   const CFDictionaryGetTypeID = cf.func("uint64_t CFDictionaryGetTypeID(void)");
-  const CFNumberGetValue = cf.func("bool CFNumberGetValue(void *number, int numberType, void *valuePtr)");
-  const CFStringGetCString = cf.func("bool CFStringGetCString(void *value, char *buffer, long bufferSize, uint32_t encoding)");
+  const CFNumberGetValue = cf.func("uint8_t CFNumberGetValue(void *number, int numberType, void *valuePtr)");
+  const CFStringGetCString = cf.func("uint8_t CFStringGetCString(void *value, char *buffer, long bufferSize, uint32_t encoding)");
   const CFStringGetLength = cf.func("long CFStringGetLength(void *value)");
   const CFStringGetMaximumSizeForEncoding = cf.func("long CFStringGetMaximumSizeForEncoding(long length, uint32_t encoding)");
   const CFArrayGetCount = cf.func("long CFArrayGetCount(void *array)");
@@ -383,7 +383,7 @@ async function loadDarwinIOKit(): Promise<DarwinIOKitLayer> {
       const matching = IOServiceMatching(className);
       if (isNullHandle(matching)) return { result: -1 };
       // IOServiceGetMatchingServices consumes the IOServiceMatching dictionary on success or failure.
-      const iteratorOut: unknown[] = [null];
+      const iteratorOut: number[] = [0];
       let consumed = false;
       try {
         const result = Number(IOServiceGetMatchingServices(0, matching, iteratorOut)); // kIOMainPortDefault/kIOMasterPortDefault == 0
@@ -394,7 +394,7 @@ async function loadDarwinIOKit(): Promise<DarwinIOKitLayer> {
       }
     },
     getChildIterator(entry) {
-      const iteratorOut: unknown[] = [null];
+      const iteratorOut: number[] = [0];
       const result = Number(IORegistryEntryGetChildIterator(entry, "IOService", iteratorOut));
       return { result, iterator: iteratorOut[0] };
     },
@@ -409,7 +409,7 @@ async function loadDarwinIOKit(): Promise<DarwinIOKitLayer> {
       try { return BigInt(value[0] as bigint | number | string); } catch { return undefined; }
     },
     parentEntry(entry) {
-      const parent: unknown[] = [null];
+      const parent: number[] = [0];
       if (Number(IORegistryEntryGetParentEntry(entry, "IOService", parent)) !== 0 || isNullHandle(parent[0])) return undefined;
       return parent[0];
     },

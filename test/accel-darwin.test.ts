@@ -19,13 +19,20 @@ function fakeIOKit(classes: Record<string, FakeEntry[]>): {
 } {
   const matchingClasses: string[] = [];
   const propertyReads: Array<{ className: string; id?: bigint; key: string }> = [];
-  const issuedIO = new Set<object>();
-  const releasedIO = new Set<object>();
+  const handles = new Map<number, FakeHandle>();
+  const issuedIO = new Set<number>();
+  const releasedIO = new Set<number>();
   const createdProperties = new Set<FakeProperty>();
   const releasedProperties = new Set<FakeProperty>();
   let matchingCreated = 0;
   let matchingConsumed = 0;
-  const issueIO = (handle: FakeHandle): FakeHandle => { issuedIO.add(handle); return handle; };
+  let nextHandle = 1;
+  const issueIO = (handle: FakeHandle): number => {
+    const port = nextHandle++;
+    issuedIO.add(port);
+    handles.set(port, handle);
+    return port;
+  };
 
   const api: DarwinIOKitLayer = {
     getMatchingServices(className) {
@@ -35,29 +42,28 @@ function fakeIOKit(classes: Record<string, FakeEntry[]>): {
       return { result: 0, iterator: issueIO({ rows: classes[className] ?? [], index: 0, label: `iterator:${className}` }) };
     },
     getChildIterator(object) {
-      const entry = (object as FakeHandle).entry!;
+      const entry = handles.get(object)!.entry!;
       return { result: 0, iterator: issueIO({ rows: entry.children ?? [], index: 0, label: `children:${entry.className}` }) };
     },
     iteratorNext(iterator) {
-      const iter = iterator as FakeHandle;
+      const iter = handles.get(iterator)!;
       const entry = iter.rows?.[iter.index ?? 0];
       if (!entry) return undefined;
       iter.index = (iter.index ?? 0) + 1;
       return issueIO({ entry, label: `service:${entry.className}` });
     },
     releaseIOObject(object) {
-      const handle = object as object;
-      if (!issuedIO.has(handle)) throw new Error("Attempted to release an IOKit object that was not owned.");
-      if (releasedIO.has(handle)) throw new Error("IOKit object was released more than once.");
-      releasedIO.add(handle);
+      if (object === 0 || !issuedIO.has(object)) throw new Error("Attempted to release an IOKit object that was not owned.");
+      if (releasedIO.has(object)) throw new Error("IOKit object was released more than once.");
+      releasedIO.add(object);
     },
-    registryEntryId(object) { return (object as FakeHandle).entry?.id; },
+    registryEntryId(object) { return handles.get(object)?.entry?.id; },
     parentEntry(object) {
-      const entry = (object as FakeHandle).entry?.parent;
+      const entry = handles.get(object)?.entry?.parent;
       return entry ? issueIO({ entry, label: `parent:${entry.className}` }) : undefined;
     },
     createCFProperty(object, key) {
-      const entry = (object as FakeHandle).entry!;
+      const entry = handles.get(object)!.entry!;
       propertyReads.push({ className: entry.className, id: entry.id, key });
       if (!entry.properties || !Object.hasOwn(entry.properties, key)) return undefined;
       const property = { key, value: entry.properties[key] };
