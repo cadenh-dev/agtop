@@ -2,7 +2,8 @@ import * as os from "node:os";
 import { backendFor } from "./backend.js";
 import { detectHarness, harnesses, isLocalHarness } from "./discovery.js";
 import { resolveGitWorktree } from "./git.js";
-import type { AgentProcess, AgentProcessTree, HarnessType, JobRecord, ProcessRole, RawOsProcess } from "./types.js";
+import { classifyTreeRoles, countRoles } from "./roles.js";
+import type { AgentProcess, AgentProcessTree, HarnessType, JobRecord, RawOsProcess } from "./types.js";
 
 export function correlateTrees(processes: RawOsProcess[], jobs: JobRecord[], members: Map<string, number[]> = new Map()): AgentProcessTree[] {
   const byPid = new Map(processes.map(p => [p.pid, p]));
@@ -34,8 +35,14 @@ export function correlateTrees(processes: RawOsProcess[], jobs: JobRecord[], mem
     const root = byPid.get(rootPid) || procs[0];
     const detected = backendFor(procs, isLocalHarness(harness));
     const backend = record?.backend && record.backend !== "unknown" ? record.backend : detected.backend;
-    const agentProcesses: AgentProcess[] = procs.map(p => ({ ...p, role: "tool", roleSource: "fallback", roleEvidence: "role classification unavailable" }));
-    const roleCounts: Partial<Record<ProcessRole, number>> = agentProcesses.length ? { tool: agentProcesses.length } : {};
+    const assignments = classifyTreeRoles({ jobId, harness, rootPid, processes: procs,
+      managed: !!record || jobId.startsWith("unmanaged-"),
+      tagId: record?.jobId ?? (jobId.startsWith("unmanaged-") ? jobId.slice("unmanaged-".length) : undefined) });
+    const agentProcesses: AgentProcess[] = procs.map(p => {
+      const assignment = assignments.get(p.pid)!;
+      return { ...p, role: assignment.role, roleSource: assignment.source, roleEvidence: assignment.evidence };
+    });
+    const roleCounts = countRoles(agentProcesses);
     trees.push({ jobId, harness, rootPid, processes: agentProcesses, roleCounts, backend,
       backendEvidence: backend === record?.backend && backend !== "unknown" ? "Recorded launch configuration" : detected.evidence,
       userOrPeer: record?.peer || root.envTags?.AGTOP_PEER || os.userInfo().username,

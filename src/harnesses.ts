@@ -469,17 +469,17 @@ const wrappers = new Set([
 const wrapperSubcommands = new Set(["run", "tool", "exec", "x"]);
 const scriptSuffix = /\.(js|cjs|mjs|py|cmd|bat|ps1|exe|sh)$/i;
 
-function base(value: string): string {
+export function base(value: string): string {
   return (value.replace(/\\/g, "/").split("/").pop() || "")
     .replace(/\.(exe|cmd|bat|ps1|js|cjs|mjs|py|sh)$/i, "")
     .toLowerCase();
 }
 
-function normalize(value: string): string {
+export function normalize(value: string): string {
   return value.replace(/\\/g, "/").toLowerCase();
 }
 
-function tokens(value: string): string[] {
+export function tokens(value: string): string[] {
   return (value.match(/"[^"]*"|'[^']*'|[^\s]+/g) || []).map(token => token.replace(/^["']|["']$/g, ""));
 }
 
