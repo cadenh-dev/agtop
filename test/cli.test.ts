@@ -148,13 +148,18 @@ describe("agtop CLI subprocess", () => {
       const processes = tree!.processes as Record<string, unknown>[];
       expect(Array.isArray(processes)).toBe(true);
       expect(processes.length).toBeGreaterThan(0);
-      for (const key of PROCESS_FIELDS) expect(processes[0]).toHaveProperty(key);
-      for (const key of ["gpuPercent", "npuPercent", "gpuMemoryMb"]) {
-        if (key in tree!) expect(typeof tree![key]).toBe("number");
+      for (const processInfo of processes) {
+        for (const key of PROCESS_FIELDS) expect(processInfo).toHaveProperty(key);
+        if (processInfo.accelerators !== undefined) {
+          expect(Array.isArray(processInfo.accelerators)).toBe(true);
+          for (const accelerator of processInfo.accelerators as Record<string, unknown>[]) {
+            expect(typeof accelerator.deviceId).toBe("string");
+            expect(["gpu", "npu"]).toContain(String(accelerator.kind));
+          }
+        }
       }
-      for (const process of processes) {
-        if ("accelerators" in process) expect(Array.isArray(process.accelerators)).toBe(true);
-        expect(Object.keys(process).filter(key => !PROCESS_FIELDS.includes(key as typeof PROCESS_FIELDS[number]) && key !== "accelerators")).toEqual([]);
+      for (const key of ["gpuPercent", "npuPercent", "gpuMemoryMb"] as const) {
+        if (tree![key] !== undefined) expect(typeof tree![key]).toBe("number");
       }
       expect(tree!.roleCounts).toBeDefined();
       expect(processes.find(p => p.pid === tree!.rootPid)).toMatchObject({ role: "agent", roleSource: "job" });
