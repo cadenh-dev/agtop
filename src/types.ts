@@ -16,7 +16,10 @@ export interface RawOsProcess {
   pid: number; ppid: number; name: string; cmdline: string; argv?: string[];
   startTime: string; cpuSeconds: number; cpuPercent: number; memoryMb: number;
   cwd?: string; pgid?: number; envTags?: Record<string, string>; cgroup?: string; state?: string;
+  /** Local inference endpoint connections observed in this snapshot. */
+  socketConnections?: SocketConnection[];
 }
+export interface SocketConnection { address: string; port: number; serverPid?: number; serverHarness?: HarnessType }
 export interface GitWorktreeInfo { repoRoot: string; branch: string; isWorktree: boolean; gitDir: string; commonDir: string }
 export interface AgentProcessTree {
   jobId: string; harness: HarnessType; backend: Backend; backendEvidence: string;
