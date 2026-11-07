@@ -6,7 +6,7 @@ import { listAgentTrees, spawnContainedAgent, killAgentTree } from "./manager.js
 import { probeLemonade } from "./backend.js";
 import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
-import { harnessCatalog } from "./harnesses.js";
+import { searchHarnesses } from "./harnesses.js";
 import { startMcpServer } from "./mcp.js";
 import type { AgentProcessTree, HarnessType, SpawnAgentOptions } from "./types.js";
 
@@ -112,8 +112,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (command === "harnesses") {
     const unknown = rest.filter(arg => arg !== "--json");
     if (unknown.length > 1) throw new Error("Usage: agtop harnesses [QUERY] [--json]");
-    const query = (unknown[0] || "").toLowerCase();
-    const catalog = harnessCatalog().filter(h => `${h.id} ${h.label} ${h.kind}`.toLowerCase().includes(query));
+    const catalog = searchHarnesses(unknown[0]);
     if (rest.includes("--json")) console.log(JSON.stringify(catalog, null, 2));
     else if (!catalog.length) console.log(`No harnesses match "${unknown[0]}".\n`);
     else {
