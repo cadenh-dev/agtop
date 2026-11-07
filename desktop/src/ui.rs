@@ -16,6 +16,10 @@ actions!(
     [NextFocus, PreviousFocus, Refresh, NewAgent, Dismiss, Quit]
 );
 
+const NEW_AGENT_SHORTCUT: &str = "ctrl-n";
+const REFRESH_SHORTCUT: &str = "ctrl-r";
+const DISMISS_SHORTCUT: &str = "escape";
+
 struct LaunchForm {
     command: Entity<TextInput>,
     args: Entity<TextInput>,
@@ -92,12 +96,8 @@ impl Workbench {
                             .total_cmp(&a.total_cpu_percent)
                             .then_with(|| a.root_pid.cmp(&b.root_pid))
                     });
-                    if self
-                        .selected
-                        .as_ref()
-                        .is_none_or(|id| !agents.iter().any(|a| &a.job_id == id))
-                    {
-                        self.selected = agents.first().map(|a| a.job_id.clone());
+                    if let Some(selected) = refreshed_selection(&agents, self.selected.as_deref()) {
+                        self.selected = selected;
                         self.confirm = None;
                     }
                     self.agents = agents;
@@ -177,7 +177,7 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let args = match parse_arguments(&form.args.read(cx).content) {
+        let args = match validate_launch_arguments(&form.args.read(cx).content) {
             Ok(args) => args,
             Err(e) => {
                 self.error = Some(e);
@@ -395,16 +395,7 @@ impl Workbench {
     }
     fn list(&self, cx: &Context<Self>) -> Div {
         let query = self.search.read(cx).content.as_ref();
-        let agents: Vec<_> = self
-            .agents
-            .iter()
-            .filter(|a| {
-                a.matches(query)
-                    && (self.filter == 0
-                        || (self.filter == 1 && a.managed())
-                        || (self.filter == 2 && !a.managed()))
-            })
-            .collect();
+        let agents = filtered_agents(&self.agents, query, self.filter);
         div()
             .w(px(340.))
             .flex_shrink_0()
@@ -510,8 +501,10 @@ impl Workbench {
                                     if self.busy { "Working…" } else { "Stop tree" },
                                     false,
                                     move |this, _, cx| {
-                                        if this.connected() && !this.busy {
-                                            this.confirm = Some(selected.clone());
+                                        if let Some(agent) =
+                                            request_stop(this.connected(), this.busy, &selected)
+                                        {
+                                            this.confirm = Some(agent);
                                             cx.notify();
                                         }
                                     },
@@ -693,7 +686,7 @@ impl Workbench {
             .child(Self::caption("Start a harness with process-tree containment."))
             .child({
                 let query = form.harness_search.read(cx).content.as_ref();
-                let choices: Vec<Harness> = self.harnesses.iter().filter(|h| h.matches(query)).cloned().collect();
+                let choices = matching_harnesses(&self.harnesses, query);
                 let count = choices.len();
                 let selected = self.harnesses.iter().find(|h| h.id == form.harness).map(|h| h.label.clone()).unwrap_or_else(|| form.harness.clone());
                 div().flex().flex_col().gap_2().child(Self::caption("Harness"))
@@ -737,6 +730,61 @@ fn fallback_harnesses() -> Vec<Harness> {
         kind: kind.into(),
     })
     .collect()
+}
+
+fn filtered_agents<'a>(agents: &'a [Agent], query: &str, filter: u8) -> Vec<&'a Agent> {
+    agents
+        .iter()
+        .filter(|agent| {
+            agent.matches(query)
+                && (filter == 0
+                    || (filter == 1 && agent.managed())
+                    || (filter == 2 && !agent.managed()))
+        })
+        .collect()
+}
+
+// None means the selection still exists; Some(None) means the snapshot is empty.
+fn refreshed_selection(agents: &[Agent], selected: Option<&str>) -> Option<Option<String>> {
+    if selected.is_some_and(|id| agents.iter().any(|agent| agent.job_id == id)) {
+        None
+    } else {
+        Some(agents.first().map(|agent| agent.job_id.clone()))
+    }
+}
+
+fn matching_harnesses(harnesses: &[Harness], query: &str) -> Vec<Harness> {
+    harnesses
+        .iter()
+        .filter(|harness| harness.matches(query))
+        .cloned()
+        .collect()
+}
+
+fn validate_launch_arguments(text: &str) -> Result<Vec<String>, String> {
+    parse_arguments(text)
+}
+
+fn request_stop(connected: bool, busy: bool, agent: &Agent) -> Option<Agent> {
+    (connected && !busy).then(|| agent.clone())
+}
+
+fn cancel_confirmation() -> Option<Agent> {
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkbenchAction {
+    NewAgent,
+    Refresh,
+}
+
+fn shortcut_action(shortcut: &str) -> Option<WorkbenchAction> {
+    match shortcut {
+        NEW_AGENT_SHORTCUT => Some(WorkbenchAction::NewAgent),
+        REFRESH_SHORTCUT => Some(WorkbenchAction::Refresh),
+        _ => None,
+    }
 }
 
 impl Render for Workbench {
@@ -788,7 +836,7 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_form(window, cx)))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if !this.busy {
-                    this.confirm = None;
+                    this.confirm = cancel_confirmation();
                     this.form = None;
                     window.focus(&this.focus);
                     cx.notify();
@@ -929,10 +977,106 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", NextFocus, None),
         KeyBinding::new("shift-tab", PreviousFocus, None),
-        KeyBinding::new("ctrl-r", Refresh, None),
-        KeyBinding::new("ctrl-n", NewAgent, None),
-        KeyBinding::new("escape", Dismiss, None),
+        KeyBinding::new(REFRESH_SHORTCUT, Refresh, None),
+        KeyBinding::new(NEW_AGENT_SHORTCUT, NewAgent, None),
+        KeyBinding::new(DISMISS_SHORTCUT, Dismiss, None),
         KeyBinding::new("ctrl-q", Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        WorkbenchAction, cancel_confirmation, fallback_harnesses, filtered_agents,
+        matching_harnesses, refreshed_selection, request_stop, shortcut_action,
+        validate_launch_arguments,
+    };
+    use crate::model::Agent;
+
+    fn agent(id: &str, harness: &str, branch: &str, pid: u32) -> Agent {
+        Agent {
+            job_id: id.into(),
+            harness: harness.into(),
+            root_pid: pid,
+            containment_mode: "job-object".into(),
+            git: Some(crate::model::GitInfo {
+                branch: branch.into(),
+                ..Default::default()
+            }),
+            processes: vec![crate::model::Process {
+                pid,
+                // Keep the process name aligned with the harness so search
+                // tests do not accidentally match unrelated fixtures.
+                name: harness.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_list_filter_searches_harness_branch_and_pid() {
+        let agents = vec![
+            agent("job-1", "codex", "feature/ui", 4101),
+            agent("job-2", "claude", "main", 5202),
+        ];
+        assert_eq!(filtered_agents(&agents, "codex", 0).len(), 1);
+        assert_eq!(filtered_agents(&agents, "FEATURE/UI", 0)[0].job_id, "job-1");
+        assert_eq!(filtered_agents(&agents, "5202", 0)[0].job_id, "job-2");
+        assert!(filtered_agents(&agents, "missing", 0).is_empty());
+    }
+
+    #[test]
+    fn selected_agent_survives_snapshot_refresh() {
+        let agents = vec![
+            agent("job-1", "codex", "main", 100),
+            agent("job-2", "claude", "main", 200),
+        ];
+        assert_eq!(refreshed_selection(&agents, Some("job-2")), None);
+        assert_eq!(
+            refreshed_selection(&agents, Some("removed")),
+            Some(Some("job-1".into()))
+        );
+        assert_eq!(refreshed_selection(&[], Some("removed")), Some(None));
+    }
+
+    #[test]
+    fn harness_picker_search_matches_id_label_and_kind() {
+        let choices = fallback_harnesses();
+        assert_eq!(matching_harnesses(&choices, "CLAUDE")[0].id, "claude-code");
+        assert_eq!(matching_harnesses(&choices, "server").len(), 1);
+        assert!(matching_harnesses(&choices, "no such harness").is_empty());
+    }
+
+    #[test]
+    fn launch_arguments_report_json_array_validation_errors() {
+        assert_eq!(
+            validate_launch_arguments(r#"["--model", "small"]"#).unwrap(),
+            vec!["--model", "small"]
+        );
+        assert_eq!(
+            validate_launch_arguments("--model small").unwrap_err(),
+            "Arguments must be a JSON array of strings, for example [\"--model\", \"my-model\"]."
+        );
+        assert!(validate_launch_arguments("[1]").is_err());
+    }
+
+    #[test]
+    fn stop_waits_for_confirmation_and_escape_cancels_it() {
+        let selected = agent("job-1", "codex", "main", 100);
+        assert!(request_stop(false, false, &selected).is_none());
+        assert!(request_stop(true, true, &selected).is_none());
+        let pending =
+            request_stop(true, false, &selected).expect("confirmation should be requested");
+        assert_eq!(pending.identity(), selected.identity());
+        assert!(cancel_confirmation().is_none());
+    }
+
+    #[test]
+    fn ctrl_n_maps_to_open_launch_form_action() {
+        assert_eq!(shortcut_action("ctrl-n"), Some(WorkbenchAction::NewAgent));
+        assert_eq!(shortcut_action("ctrl-r"), Some(WorkbenchAction::Refresh));
+        assert_eq!(shortcut_action("ctrl-q"), None);
+    }
 }
