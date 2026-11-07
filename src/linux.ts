@@ -3,8 +3,8 @@ import koffi from "koffi";
 import { linuxIdentity } from "./discovery.js";
 
 type PidfdOps = {
-  open(pid: number): number;
-  send(fd: number, signal: number): number;
+  open(pid: number, flags: number): number;
+  send(fd: number, signal: number, info: null, flags: number): number;
 };
 
 function loadPidfdOps(): PidfdOps | undefined {
@@ -23,11 +23,11 @@ const pidfdOps = process.platform === "linux" ? loadPidfdOps() : undefined;
 export async function signalLinuxProcess(pid: number, expectedStartTime: string, signal: number,
   ops: PidfdOps | undefined = pidfdOps, identity: (pid: number) => Promise<string | undefined> = linuxIdentity): Promise<"pidfd" | "fallback" | "reused"> {
   if (ops) {
-    const fd = ops.open(pid);
+    const fd = ops.open(pid, 0);
     if (fd >= 0) {
       try {
         if (await identity(pid) !== expectedStartTime) return "reused";
-        if (ops.send(fd, signal) === 0) return "pidfd";
+        if (ops.send(fd, signal, null, 0) === 0) return "pidfd";
         // Unsupported syscall or a transient pidfd failure: retain the legacy
         // identity-checked path. Permission failures surface there as well.
       } finally { fs.closeSync(fd); }
