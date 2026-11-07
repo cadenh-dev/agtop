@@ -111,6 +111,10 @@ export interface WatchdogIo {
   waitForManager(): void;
 }
 
+export function ignoreWatchdogPipeErrors(pipe: Writable): void {
+  pipe.on("error", () => {});
+}
+
 export interface WatchdogCleanupOptions {
   deadlineMs?: number;
   maxPermissionFailures?: number;

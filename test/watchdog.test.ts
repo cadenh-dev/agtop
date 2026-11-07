@@ -2,10 +2,11 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { spawnContainedAgent } from "../src/manager.js";
 import { readJobs } from "../src/registry.js";
-import { cleanupWatchdog, launchWatchdog, runWatchdog, WATCHDOG_ARG, watchdogCommand } from "../src/watchdog.js";
+import { cleanupWatchdog, ignoreWatchdogPipeErrors, launchWatchdog, runWatchdog, WATCHDOG_ARG, watchdogCommand } from "../src/watchdog.js";
 import type { PosixOps } from "../src/platform.js";
 import type { RawOsProcess } from "../src/types.js";
 
@@ -140,6 +141,13 @@ test("watchdog rejects a control descriptor that is not a pipe or socket", async
   });
   expect(result).toBe(2);
   expect(readyCount).toBe(0);
+});
+
+test("watchdog pipe absorbs errors after a successful helper launch", () => {
+  const pipe = new PassThrough();
+  ignoreWatchdogPipeErrors(pipe);
+  expect(() => pipe.emit("error", new Error("helper exited"))).not.toThrow();
+  pipe.destroy();
 });
 
 test.skipIf(process.platform === "win32")("failed manager watchdog launch kills the helper and keeps the gated harness from starting", async () => {

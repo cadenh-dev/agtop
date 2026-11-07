@@ -11,7 +11,7 @@ import { readJobs, reserveJob, validateJobId, writeJob } from "./registry.js";
 import { correlateTrees } from "./trees.js";
 import { windowsApi } from "./windows.js";
 import { assertSupportedPlatform, isPgidMode, posixOps, scanProcesses } from "./platform.js";
-import { launchWatchdog, watchdogCommand } from "./watchdog.js";
+import { ignoreWatchdogPipeErrors, launchWatchdog, watchdogCommand } from "./watchdog.js";
 import type { AgentProcessTree, JobRecord, KillResult, ManagedAgent, RawOsProcess, SpawnAgentOptions } from "./types.js";
 
 const sampler = new CpuSampler();
@@ -198,7 +198,7 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
       const started = await startWatchdog(record.rootPid, id);
       watchdog = started.child;
       watchdogPipe = started.pipe;
-      watchdogPipe.on("error", () => {});
+      ignoreWatchdogPipeErrors(watchdogPipe);
     }
     (launched.stdio[3] as Writable).end("go\n");
     const exited = rawExit.finally(async () => {
