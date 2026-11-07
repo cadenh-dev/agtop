@@ -9,6 +9,7 @@ import { CpuSampler, harnesses, isLocalHarness } from "./discovery.js";
 import { backendFor, lemonadeBase } from "./backend.js";
 import { readJobs, reserveJob, validateJobId, writeJob } from "./registry.js";
 import { correlateTrees } from "./trees.js";
+import { accelSampler } from "./accelerators.js";
 import { windowsApi } from "./windows.js";
 import { assertSupportedPlatform, isPgidMode, posixOps, scanProcesses } from "./platform.js";
 import { ignoreWatchdogPipeErrors, launchWatchdog, watchdogCommand } from "./watchdog.js";
@@ -38,7 +39,9 @@ export function listAgentTrees(): Promise<AgentProcessTree[]> {
   return scanning ??= (async () => {
     const processes = sampler.sample(await scanProcesses());
     const jobs = readJobs();
-    return correlateTrees(processes, jobs, new Map(jobs.map(job => [job.jobId, members(job, processes)])));
+    const trees = correlateTrees(processes, jobs, new Map(jobs.map(job => [job.jobId, members(job, processes)])));
+    try { await accelSampler.sample(trees); } catch { /* Accelerator telemetry must not fail process discovery. */ }
+    return trees;
   })().finally(() => { scanning = undefined; });
 }
 export async function killAgentTree(id: string, options: { expectedStartTime?: string } = {}): Promise<KillResult> {
