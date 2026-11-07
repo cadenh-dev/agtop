@@ -31,6 +31,23 @@ actions!(
     ]
 );
 
+#[cfg(target_os = "macos")]
+const SELECT_ALL_SHORTCUT: &str = "cmd-a";
+#[cfg(not(target_os = "macos"))]
+const SELECT_ALL_SHORTCUT: &str = "ctrl-a";
+#[cfg(target_os = "macos")]
+const PASTE_SHORTCUT: &str = "cmd-v";
+#[cfg(not(target_os = "macos"))]
+const PASTE_SHORTCUT: &str = "ctrl-v";
+#[cfg(target_os = "macos")]
+const COPY_SHORTCUT: &str = "cmd-c";
+#[cfg(not(target_os = "macos"))]
+const COPY_SHORTCUT: &str = "ctrl-c";
+#[cfg(target_os = "macos")]
+const CUT_SHORTCUT: &str = "cmd-x";
+#[cfg(not(target_os = "macos"))]
+const CUT_SHORTCUT: &str = "ctrl-x";
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     pub content: SharedString,
@@ -653,10 +670,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("right", Right, Some("TextInput")),
         KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
         KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
-        KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
-        KeyBinding::new("ctrl-v", Paste, Some("TextInput")),
-        KeyBinding::new("ctrl-c", Copy, Some("TextInput")),
-        KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
+        KeyBinding::new(SELECT_ALL_SHORTCUT, SelectAll, Some("TextInput")),
+        KeyBinding::new(PASTE_SHORTCUT, Paste, Some("TextInput")),
+        KeyBinding::new(COPY_SHORTCUT, Copy, Some("TextInput")),
+        KeyBinding::new(CUT_SHORTCUT, Cut, Some("TextInput")),
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
     ]);
