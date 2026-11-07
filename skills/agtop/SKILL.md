@@ -17,7 +17,7 @@ The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `
    - `agtop_run { "command": "codex", "args": ["exec", "..."], "cwd": "/path/to/worktree", "harness": "codex", "jobId": "task-123", "peer": "my-task" }`
 3. Wait for it when you need the exit code:
    - `agtop_wait { "jobId": "task-123", "timeoutMs": 60000 }`
-4. Inspect while it runs; `status` shows each process's role and listening ports for jobs owned by this MCP session:
+4. Inspect while it runs; `status` shows each process's role, listening ports, and measured GPU/NPU usage for jobs owned by this MCP session:
    - `agtop_status { "jobId": "task-123", "includeProcesses": true }`
 5. Stop it when you are done:
    - `agtop_kill { "jobId": "task-123" }`

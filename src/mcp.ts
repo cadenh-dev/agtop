@@ -6,7 +6,8 @@ import { probeLemonade } from "./backend.js";
 import { pruneStaleJobs } from "./registry.js";
 import { searchHarnesses, harnesses, harnessLabel } from "./harnesses.js";
 import { killAgentTree, listAgentTrees, spawnContainedAgent } from "./manager.js";
-import type { AgentProcessTree, HarnessType, ManagedAgent } from "./types.js";
+import { getAcceleratorSnapshot } from "./accelerators.js";
+import type { AgentProcess, AgentProcessTree, HarnessType, ManagedAgent } from "./types.js";
 
 const VERSION = "0.1.0";
 
@@ -59,7 +60,7 @@ function peerFor(extra: { _meta?: Record<string, unknown> }, requested?: string,
   return (typeof session === "string" && session ? `${base}:${session}` : base).slice(0, 200);
 }
 
-function summary(tree: AgentProcessTree) {
+export function summary(tree: AgentProcessTree) {
   return {
     jobId: tree.jobId,
     harness: tree.harness,
@@ -73,12 +74,31 @@ function summary(tree: AgentProcessTree) {
     peer: tree.userOrPeer,
     cpuPercent: Number(tree.totalCpuPercent.toFixed(1)),
     memoryMb: Number(tree.totalMemoryMb.toFixed(1)),
+    gpuPercent: tree.gpuPercent,
+    npuPercent: tree.npuPercent,
+    gpuMemoryMb: tree.gpuMemoryMb,
     processCount: tree.processes.length,
     git: tree.git
       ? { repoRoot: tree.git.repoRoot, branch: tree.git.branch, isWorktree: tree.git.isWorktree }
       : undefined,
     owned: owned.has(tree.jobId),
   };
+}
+
+export function ownedProcessSummary(p: AgentProcess) {
+  return {
+    pid: p.pid, ppid: p.ppid, name: p.name, cmdline: p.cmdline,
+    cpuPercent: Number(p.cpuPercent.toFixed(1)), memoryMb: Number(p.memoryMb.toFixed(1)),
+    role: p.role, roleEvidence: p.roleEvidence, accelerators: p.accelerators,
+    listening: (p.listeningSockets ?? []).map(socket => formatListeningEndpoint(socket.address, socket.port)),
+  };
+}
+
+export function statusPayload(tree: AgentProcessTree, isOwned: boolean, includeProcesses: boolean): Record<string, unknown> {
+  const value: Record<string, unknown> = summary(tree);
+  if (includeProcesses && isOwned) value.processes = tree.processes.map(ownedProcessSummary);
+  else if (includeProcesses) value.note = "Process details are only available for jobs created by this MCP session.";
+  return value;
 }
 
 function ownedSummary(jobId: string, job: OwnedJob) {
@@ -123,7 +143,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
 
   server.registerTool("list", {
     title: "List agent trees",
-    description: "List known agent trees with harness, process role counts, worktree, CPU, memory, and containment mode. Command lines are omitted for jobs this session does not own.",
+    description: "List known agent trees with harness, process role counts, worktree, CPU, memory, GPU/NPU totals, and containment mode. Command lines are omitted for jobs this session does not own.",
     inputSchema: { query: z.string().max(200).optional().describe("Filter by job, harness, role, peer, branch, backend, or containment mode.") },
     annotations: { readOnlyHint: true },
   }, async ({ query }) => {
@@ -141,7 +161,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
 
   server.registerTool("status", {
     title: "Inspect a job",
-    description: "Inspect one job. Process details are included only for jobs created by this MCP session.",
+    description: "Inspect one job with GPU/NPU tree totals. Per-process details, including accelerator usage, are included only for jobs created by this MCP session.",
     inputSchema: {
       jobId: z.string().min(1).max(80).describe("Job ID returned by run."),
       includeProcesses: z.boolean().optional().describe("Include the process tree for an owned job."),
@@ -154,18 +174,8 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
       if (!tree) {
         return job ? text(ownedSummary(jobId, job)) : failure(`agtop: no job named ${jobId}.`);
       }
-      const value: Record<string, unknown> = summary(tree);
+      const value = statusPayload(tree, Boolean(job), Boolean(includeProcesses));
       if (job) Object.assign(value, ownedSummary(jobId, job));
-      if (includeProcesses && job) {
-        value.processes = tree.processes.map(p => ({
-          pid: p.pid, ppid: p.ppid, name: p.name, cmdline: p.cmdline,
-          cpuPercent: Number(p.cpuPercent.toFixed(1)), memoryMb: Number(p.memoryMb.toFixed(1)),
-          role: p.role, roleEvidence: p.roleEvidence,
-          listening: (p.listeningSockets ?? []).map(socket => formatListeningEndpoint(socket.address, socket.port)),
-        }));
-      } else if (includeProcesses) {
-        value.note = "Process details are only available for jobs created by this MCP session.";
-      }
       return text(value);
     } catch (e) {
       return failure(`agtop: ${e instanceof Error ? e.message : String(e)}`);
@@ -305,6 +315,21 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
     annotations: { readOnlyHint: true },
   }, async () => {
     return text(await probeLemonade());
+  });
+
+  server.registerTool("accelerators", {
+    title: "Inspect GPU and NPU devices",
+    description: "Show detected GPU/NPU devices and measurement availability. Does not expose per-process usage.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  }, async () => {
+    try {
+      let snapshot = getAcceleratorSnapshot();
+      if (!snapshot) { await listAgentTrees(); snapshot = getAcceleratorSnapshot(); }
+      return text(snapshot ?? { devices: [], status: [], sampledAt: performance.now() });
+    } catch (e) {
+      return failure(`agtop: ${e instanceof Error ? e.message : String(e)}`);
+    }
   });
 
   let closing = false;

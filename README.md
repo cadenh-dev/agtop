@@ -121,6 +121,20 @@ Roles are hints from process names, executable paths, safe command anchors, tree
 
 Socket evidence currently formats IPv6 role endpoints without brackets (for example, `::1:3000`), so the host and port can be ambiguous. MCP `listening` values use bracketed IPv6 notation.
 
+## GPU and NPU usage
+
+`agtop ps`, `agtop top`, and the desktop show measured accelerator use when the platform exposes it. `agtop gpu` (or `agtop accelerators`) shows detected devices and measurement status; `--json` prints the snapshot. `agtop ps --json` adds optional process fields (`accelerators`) and tree totals (`gpuPercent`, `npuPercent`, `gpuMemoryMb`). Undefined fields mean agtop could not measure that value; they are omitted or left blank, never shown as zero.
+
+| OS / source | What's measured | Privileges | Known gaps |
+| --- | --- | --- | --- |
+| Windows / `windows-pdh` | GPU Engine process utilization and dedicated memory, with compute-only adapters classified as NPUs | No elevation | Per-process utilization depends on reported PDH instances; NPU detection through compute-only adapters is not yet tested on NPU hardware |
+| Linux / `linux-drm-fdinfo` | Per-process DRM engine time and local/VRAM resident memory for processes in agent trees | No elevation; other-user fdinfo may be denied | Other-user processes can be skipped when permissions deny fdinfo access; some drivers expose memory only |
+| Linux / `nvml` | NVIDIA device utilization and per-process engine utilization or memory when supported | No elevation | NVIDIA consumer cards may not expose per-process utilization |
+| macOS / `darwin-iokit` | Best-effort per-process GPU counters and device utilization from undocumented IOKit counters | No elevation | Counters are undocumented and may vary by OS version; no Neural Engine per-process usage is exposed |
+| Unsupported / `none` | No accelerator telemetry | — | The platform has no configured provider, telemetry was disabled, or no devices were found |
+
+Per-process utilization is the maximum across the process's engines on a device. Tree GPU/NPU totals sum processes per device, clamp at 100%, then show the busiest device; two GPUs at 60% each therefore report 60%. GPU memory is the sum of measured per-process GPU memory. A process needs two samples before interval-based utilization appears, so the first sample is blank. Set `AGTOP_ACCELERATORS=0` to disable accelerator sampling.
+
 ### Recognition
 
 Passive discovery does not require agent cooperation. agtop reads the OS process table (CIM on Windows, `/proc` on Linux, and libproc on macOS) and matches a process by executable basename, interpreter entry point, install path, Python module, or a disambiguating subcommand:
@@ -156,7 +170,7 @@ Git attribution walks upward from cwd and reads `.git`, `HEAD`, and `commondir`,
 
 `run --lemonade` sets `OPENAI_BASE_URL`, `OPENAI_API_BASE`, and `ANTHROPIC_BASE_URL` without replacing your API credentials. Use `--lemonade-url URL` for another base URL. Check your harness's endpoint configuration requirements. Current endpoints are described in the [Lemonade API documentation](https://lemonade-server.ai/docs/api/lemonade/).
 
-Backend labels include their evidence. agtop attributes established loopback TCP connections from an agent tree to the listening process when it recognizes a local inference server. Evidence includes the client PID, endpoint, server harness, and server PID (for example, `socket: pid 1234 -> 127.0.0.1:11434 (ollama, pid 999)`). Connections to the known Lemonade port 13305 are labeled Lemonade even when its process is not recognized. A local port without a recognized server remains `unknown` and names the observed endpoint; remote peers are never labeled local. Explicit Lemonade launch settings still indicate intended routing. Socket evidence shows a connection, not model execution or GPU/NPU activity, which agtop does not measure.
+Backend labels include their evidence. agtop attributes established loopback TCP connections from an agent tree to the listening process when it recognizes a local inference server. Evidence includes the client PID, endpoint, server harness, and server PID (for example, `socket: pid 1234 -> 127.0.0.1:11434 (ollama, pid 999)`). Connections to the known Lemonade port 13305 are labeled Lemonade even when its process is not recognized. A local port without a recognized server remains `unknown` and names the observed endpoint; remote peers are never labeled local. Explicit Lemonade launch settings still indicate intended routing. Socket evidence shows a connection, not model execution or hardware activity.
 
 ## Daemon
 
@@ -170,6 +184,7 @@ The server binds to `127.0.0.1`. Its startup message gives the token file path. 
 | --- | --- | --- |
 | GET | `/v1/harnesses` | Supported harness catalog: id, label and kind |
 | GET | `/v1/agents` | Agent trees, CPU/RSS, worktree and containment metadata |
+| GET | `/v1/accelerators` | Accelerator devices and measurement status; no per-process data |
 | GET | `/v1/lemonade` | Local server status |
 | POST | `/v1/agents` | Spawn options JSON; returns job ID, PID and containment mode |
 | POST | `/v1/agents/:id/kill` | Confirmed exits, remaining PIDs and errors |
@@ -178,7 +193,7 @@ Daemon-created processes use ignored stdio. Graceful shutdown terminates jobs cr
 
 ## MCP server
 
-`agtop mcp` is a stdio MCP server for agents. It provides **task-scoped containment**: an agent can start a long-lived helper or subagent, inspect it, wait for it, and stop it, but cannot stop jobs created by another session. `list` includes `roleCounts`; `status` includes each process's role and listening ports only for jobs owned by this MCP session.
+`agtop mcp` is a stdio MCP server for agents. It provides **task-scoped containment**: an agent can start a long-lived helper or subagent, inspect it, wait for it, and stop it, but cannot stop jobs created by another session. `list` includes `roleCounts` and GPU/NPU tree totals; `status` includes each process's role, listening ports, and accelerator usage only for jobs owned by this MCP session. The `accelerators` tool reports devices and measurement status without per-process data.
 
 | Tool | Purpose |
 | --- | --- |
@@ -190,6 +205,7 @@ Daemon-created processes use ignored stdio. Graceful shutdown terminates jobs cr
 | `cleanup` | Stop every job created by this MCP session |
 | `harnesses` | Search the supported harness catalog |
 | `lemonade` | Probe the local Lemonade server |
+| `accelerators` | Show accelerator devices and measurement status without per-process data |
 
 The job ID is the task ID: pass your orchestrator or thread task ID as `jobId`, and a peer label as `peer`. OpenCode passes its session ID in MCP metadata; the server appends it to `AGTOP_PEER` automatically. `cleanup` and server shutdown terminate owned jobs, so a finished task does not leave watchers or dev servers behind. MCP `cleanup` also removes records proven stale; it never removes another session's live records. Output is discarded; use the agent's normal shell for commands whose stdout the agent needs.
 

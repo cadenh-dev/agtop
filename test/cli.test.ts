@@ -109,7 +109,7 @@ describe("agtop CLI subprocess", () => {
   test("--help exits 0 and lists commands", async () => {
     const { code, stdout } = await runCli(["--help"]);
     expect(code).toBe(0);
-    for (const snippet of ["agtop ps", "agtop run", "agtop kill", "agtop harnesses", "agtop roles", "agtop lemonade", "agtop daemon", "agtop mcp", "agtop ui", "macOS uses a process group"]) {
+    for (const snippet of ["agtop ps", "agtop gpu", "alias: accelerators", "agtop run", "agtop kill", "agtop harnesses", "agtop roles", "agtop lemonade", "agtop daemon", "agtop mcp", "agtop ui", "macOS uses a process group"]) {
       expect(stdout).toContain(snippet);
     }
   });
@@ -148,7 +148,19 @@ describe("agtop CLI subprocess", () => {
       const processes = tree!.processes as Record<string, unknown>[];
       expect(Array.isArray(processes)).toBe(true);
       expect(processes.length).toBeGreaterThan(0);
-      for (const key of PROCESS_FIELDS) expect(processes[0]).toHaveProperty(key);
+      for (const processInfo of processes) {
+        for (const key of PROCESS_FIELDS) expect(processInfo).toHaveProperty(key);
+        if (processInfo.accelerators !== undefined) {
+          expect(Array.isArray(processInfo.accelerators)).toBe(true);
+          for (const accelerator of processInfo.accelerators as Record<string, unknown>[]) {
+            expect(typeof accelerator.deviceId).toBe("string");
+            expect(["gpu", "npu"]).toContain(String(accelerator.kind));
+          }
+        }
+      }
+      for (const key of ["gpuPercent", "npuPercent", "gpuMemoryMb"] as const) {
+        if (tree![key] !== undefined) expect(typeof tree![key]).toBe("number");
+      }
       expect(tree!.roleCounts).toBeDefined();
       expect(processes.find(p => p.pid === tree!.rootPid)).toMatchObject({ role: "agent", roleSource: "job" });
     } finally {
@@ -156,6 +168,15 @@ describe("agtop CLI subprocess", () => {
       await Promise.race([new Promise<void>(r => supervisor.once("exit", () => r())), delay(5000)]);
       if (supervisor.exitCode === null) supervisor.kill("SIGKILL");
     }
+  }, 60_000);
+
+  test("gpu --json prints devices and status", async () => {
+    const { code, stdout } = await runCli(["gpu", "--json"], { timeout: 60_000 });
+    expect(code).toBe(0);
+    const snapshot = JSON.parse(stdout) as { devices: unknown[]; status: unknown[]; sampledAt: number };
+    expect(Array.isArray(snapshot.devices)).toBe(true);
+    expect(Array.isArray(snapshot.status)).toBe(true);
+    expect(typeof snapshot.sampledAt).toBe("number");
   }, 60_000);
 
   test("harnesses codex --json filters the catalog", async () => {

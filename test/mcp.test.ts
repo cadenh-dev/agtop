@@ -5,7 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { cleanupResults, formatListeningEndpoint } from "../src/mcp.js";
+import { cleanupResults, formatListeningEndpoint, ownedProcessSummary, statusPayload, summary } from "../src/mcp.js";
+import type { AgentProcessTree } from "../src/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { killByMarker } from "../scripts/process-probe.js";
@@ -83,6 +84,26 @@ test("cleanup reports a rejected termination and keeps successful results", () =
     { jobId: "bad", error: "terminate failed" },
     { jobId: "good", killedPids: [42], failedPids: [], errors: [] },
   ]);
+});
+
+test("MCP summaries expose tree aggregates and owned process accelerators", () => {
+  const tree = {
+    jobId: "fixture", harness: "custom", backend: "unknown", backendEvidence: "", userOrPeer: "p",
+    rootPid: 5, containmentMode: "passive-ppid", totalCpuPercent: 0, totalMemoryMb: 0,
+    roleCounts: {}, gpuPercent: 61, npuPercent: 12, gpuMemoryMb: 256,
+    processes: [{
+      pid: 5, ppid: 0, name: "agent", cmdline: "agent", startTime: "1", cpuSeconds: 0,
+      cpuPercent: 0, memoryMb: 0, role: "agent", roleSource: "job", roleEvidence: "root",
+      accelerators: [{ deviceId: "gpu0", kind: "gpu", utilizationPercent: 61 }],
+    }],
+  } as AgentProcessTree;
+  expect(summary(tree)).toMatchObject({ gpuPercent: 61, npuPercent: 12, gpuMemoryMb: 256 });
+  expect(ownedProcessSummary(tree.processes[0])).toMatchObject({ accelerators: [{ deviceId: "gpu0", utilizationPercent: 61 }] });
+  const ownedStatus = statusPayload(tree, true, true);
+  expect(ownedStatus.processes).toMatchObject([{ accelerators: [{ deviceId: "gpu0" }] }]);
+  const foreignStatus = statusPayload(tree, false, true);
+  expect(foreignStatus).toMatchObject({ gpuPercent: 61, npuPercent: 12, gpuMemoryMb: 256 });
+  expect(foreignStatus).not.toHaveProperty("processes");
 });
 interface HarnessBody { harnesses: Array<{ id: string }>; }
 
@@ -431,6 +452,16 @@ test("harness search returns the full catalog for an empty query and nothing for
     expect(all.harnesses.length).toBeGreaterThan(0);
     expect(blank.harnesses.map(item => item.id)).toEqual(all.harnesses.map(item => item.id));
     expect(unknown.harnesses).toEqual([]);
+  });
+}, 20000);
+
+test("accelerators tool returns devices and statuses without process details", async () => {
+  await withSession(async session => {
+    const result = body<{ devices: unknown[]; status: unknown[]; sampledAt: number }>(await invoke(session, "accelerators"));
+    expect(Array.isArray(result.devices)).toBe(true);
+    expect(Array.isArray(result.status)).toBe(true);
+    expect(typeof result.sampledAt).toBe("number");
+    expect(result).not.toHaveProperty("processes");
   });
 }, 20000);
 

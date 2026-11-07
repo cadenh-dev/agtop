@@ -67,7 +67,7 @@ try {
 
   await check("tools/list exposes the task-containment surface", async () => {
     const tools = (await client.listTools()).tools.map(tool => tool.name).sort();
-    assert.deepEqual(tools, ["cleanup", "harnesses", "kill", "lemonade", "list", "run", "status", "wait"]);
+    assert.deepEqual(tools, ["accelerators", "cleanup", "harnesses", "kill", "lemonade", "list", "run", "status", "wait"]);
   });
 
   await check("harness search returns the expanded catalog", async () => {
