@@ -732,7 +732,7 @@ fn fallback_harnesses() -> Vec<Harness> {
     .collect()
 }
 
-fn filtered_agents(agents: &[Agent], query: &str, filter: u8) -> Vec<&Agent> {
+fn filtered_agents<'a>(agents: &'a [Agent], query: &str, filter: u8) -> Vec<&'a Agent> {
     agents
         .iter()
         .filter(|agent| {
