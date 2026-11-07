@@ -10,6 +10,7 @@ import { backendFor, lemonadeBase } from "./backend.js";
 import { readJobs, reserveJob, validateJobId, writeJob } from "./registry.js";
 import { correlateTrees } from "./trees.js";
 import { windowsApi } from "./windows.js";
+import { signalLinuxProcess } from "./linux.js";
 import type { AgentProcessTree, JobRecord, KillResult, ManagedAgent, RawOsProcess, SpawnAgentOptions } from "./types.js";
 
 const sampler = new CpuSampler();
@@ -56,15 +57,13 @@ export async function killAgentTree(id: string, options: { expectedStartTime?: s
       atomic = true;
     } else if (job?.mode === "linux-cgroup" && job.cgroupPath) {
       fs.writeFileSync(path.join(job.cgroupPath, "cgroup.kill"), "1"); atomic = true;
-    } else if (job?.mode === "linux-env-pgid" && await linuxIdentity(job.rootPid) === job.startTime) {
-      process.kill(-job.rootPid, "SIGKILL");
     }
   } catch (e) { result.errors.push(String(e)); }
   if (!atomic) {
     for (const p of [...target.processes].reverse()) {
       try {
         if (process.platform === "win32") { if (windowsApi().killProcess(p)) result.killedPids.push(p.pid); else result.failedPids.push(p.pid); }
-        else if (await linuxIdentity(p.pid) === p.startTime) process.kill(p.pid, "SIGKILL");
+        else await signalLinuxProcess(p.pid, p.startTime, 9);
       } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") result.errors.push(`PID ${p.pid}: ${String(e)}`); }
     }
   }
@@ -149,6 +148,7 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
     }
   }
   let child: ReturnType<typeof spawn> | undefined;
+  let watchdog: ReturnType<typeof spawn> | undefined;
   try {
     const cgroupRoot = opts.cgroupRoot ?? process.env.AGTOP_CGROUP_ROOT;
     if (cgroupRoot) {
@@ -172,6 +172,12 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
     if (!record.startTime) throw new Error("Launch process exited before containment setup.");
     if (record.cgroupPath) fs.writeFileSync(path.join(record.cgroupPath, "cgroup.procs"), String(record.rootPid));
     writeJob(record);
+    if (!record.cgroupPath) {
+      const watchdogPath = new URL("./linux-watchdog.ts", import.meta.url).pathname;
+      const watchdogEnv = { ...process.env };
+      delete watchdogEnv.AGTOP_JOB_ID; delete watchdogEnv.AGTOP_HARNESS; delete watchdogEnv.AGTOP_PEER; delete watchdogEnv.AGTOP_WORKTREE;
+      watchdog = spawn(process.execPath, [watchdogPath, String(record.rootPid), id], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: watchdogEnv });
+    }
     (launched.stdio[3] as Writable).end("go\n");
     const exited = rawExit.finally(async () => {
       try {
@@ -179,14 +185,14 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
         else {
           const remaining = await scanLinuxProcesses();
           for (const p of remaining.filter(p => p.envTags?.AGTOP_JOB_ID === id || p.pgid === record.rootPid)) {
-            if (await linuxIdentity(p.pid) === p.startTime) try { process.kill(p.pid, "SIGKILL"); } catch {}
+            try { await signalLinuxProcess(p.pid, p.startTime, 9); } catch {}
           }
         }
-      } finally { release(); if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {} }
+      } finally { (watchdog?.stdio[3] as Writable | null)?.end(); release(); if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {} }
     });
     return { jobId: id, pid: record.rootPid, containmentMode: record.mode, exited, terminate: () => killAgentTree(id) };
   } catch (e) {
-    child?.kill("SIGKILL"); release();
+    child?.kill("SIGKILL"); (watchdog?.stdio[3] as Writable | null)?.end(); watchdog?.kill("SIGKILL"); release();
     if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {}
     throw e;
   }
