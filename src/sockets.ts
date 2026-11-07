@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import koffi from "koffi";
+import { darwinTcpRows } from "./darwin.js";
 import { detectHarness, harnessKind } from "./harnesses.js";
 import type { ListeningSocket, RawOsProcess, SocketConnection } from "./types.js";
 
@@ -134,7 +135,8 @@ export function parseWindowsTcpTable(data: Buffer, family: 2 | 23): TcpRow[] {
 /** Attach one socket snapshot to the process snapshot. Errors only omit socket evidence. */
 export async function collectSocketConnections(processes: RawOsProcess[], platform: NodeJS.Platform = process.platform): Promise<void> {
   try {
-    const rows = platform !== process.platform ? [] : platform === "linux" ? await linuxRows() : platform === "win32" ? windowsRows() : [];
+    const rows = platform !== process.platform ? [] : platform === "linux" ? await linuxRows()
+      : platform === "win32" ? windowsRows() : platform === "darwin" ? darwinTcpRows(processes.map(proc => proc.pid)) : [];
     const byPid = new Map(processes.map(proc => [proc.pid, proc]));
     for (const [pid, connections] of attributeTcpRows(rows, processes)) {
       const proc = byPid.get(pid);

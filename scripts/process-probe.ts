@@ -25,6 +25,21 @@ export function findByMarker(marker: string): ProcessProbe[] {
       cmdline: String(row.CommandLine || ""),
     })).filter(process => process.pid > 0);
   }
+  if (process.platform === "darwin") {
+    const output = execFileSync("/bin/ps", ["-axww", "-o", "pid=,ppid=,stat=,command="], {
+      encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024,
+      env: { ...process.env, LC_ALL: "C" },
+    });
+    const result: ProcessProbe[] = [];
+    for (const line of output.split(/\r?\n/)) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+      if (!match) continue;
+      const pid = Number(match[1]), ppid = Number(match[2]), state = match[3], cmdline = match[4].trim();
+      if (!Number.isSafeInteger(pid) || pid <= 0 || /Z/.test(state) || !cmdline.includes(marker)) continue;
+      result.push({ pid, ppid, name: path.basename(cmdline.split(/\s+/, 1)[0] || ""), cmdline, state });
+    }
+    return result;
+  }
   const result: ProcessProbe[] = [];
   for (const entry of fs.readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
