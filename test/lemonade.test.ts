@@ -227,11 +227,11 @@ describe("backendFor lemonade evidence", () => {
   test("no observable Lemonade routing stays unknown", () => {
     expect(backendFor(withEnv({ OPENAI_BASE_URL: "http://127.0.0.1:9999/v1" }))).toEqual({
       backend: "unknown",
-      evidence: "No observable endpoint configuration",
+      evidence: "No observable endpoint configuration or local socket",
     });
     expect(backendFor([])).toEqual({
       backend: "unknown",
-      evidence: "No observable endpoint configuration",
+      evidence: "No observable endpoint configuration or local socket",
     });
   });
 });
