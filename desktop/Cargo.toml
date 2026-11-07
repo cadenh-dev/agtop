@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "Native GPUI desktop interface for agtop"
 
+[features]
+runtime-shaders = ["gpui/runtime_shaders"]
+
 [dependencies]
 # gpui_http_client pulls xattr 0.2.3, which uses libc::ENOATTR on Linux.
 # libc removed that deprecated alias in 0.2.190; keep the older release.

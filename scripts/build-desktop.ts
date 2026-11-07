@@ -28,6 +28,18 @@ if (windows && fs.existsSync(path.join(portable, "VC", "Tools", "MSVC"))) {
 const mode = process.argv[2] || "build";
 if (!["build", "check", "test", "clippy", "fmt"].includes(mode)) throw new Error("Expected build, check, test, clippy, or fmt.");
 const extra = process.argv.slice(3);
+if (process.platform === "darwin" && ["build", "check", "test", "clippy"].includes(mode)) {
+  if (environment.AGTOP_GPUI_RUNTIME_SHADERS === "1") {
+    extra.push("--features", "runtime-shaders");
+  } else {
+    const metal = spawn("xcrun", ["-sdk", "macosx", "metal", "-v"], { cwd: root, env: environment, stdio: "ignore", windowsHide: true });
+    const metalCode = await new Promise<number>(resolve => { metal.once("error", () => resolve(1)); metal.once("exit", code => resolve(code ?? 1)); });
+    if (metalCode) {
+      console.error("Metal compiler unavailable. Install Xcode and run `xcodebuild -downloadComponent MetalToolchain`, or set AGTOP_GPUI_RUNTIME_SHADERS=1.");
+      process.exit(1);
+    }
+  }
+}
 // Bun strips a script's first '--'; restore the rustc separator for Clippy lint flags.
 if (mode === "clippy" && !extra.includes("--")) {
   const lint = extra.findIndex(v => /^-[ADWF]$|^--(deny|warn|allow|forbid)$/.test(v));

@@ -3,9 +3,14 @@ on: [push, pull_request]
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: macos-latest
+            experimental: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -44,10 +49,18 @@ jobs:
           cp "$binary" "$isolated/$(basename "$binary")"
           cd "$isolated"
           ./$(basename "$binary") run -- node -e "console.log('Standalone smoke test')"
+      - name: Compiled crash cleanup (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ -f test/posix-crash.test.ts ]; then
+            AGTOP_TEST_BIN="$GITHUB_WORKSPACE/dist/agtop" bun test test/posix-crash.test.ts
+          fi
   desktop:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +76,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang cmake pkg-config libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libssl-dev libvulkan-dev
+      - name: Ensure Metal toolchain
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun -sdk macosx metal -v >/dev/null 2>&1; then xcodebuild -downloadComponent MetalToolchain; fi
+          xcrun -sdk macosx metal -v
       - run: bun scripts/build-desktop.ts fmt -- --check
       - run: bun scripts/build-desktop.ts test --locked
       - run: bun scripts/build-desktop.ts build --locked

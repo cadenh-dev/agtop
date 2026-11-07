@@ -45,7 +45,7 @@ export const HARNESS_DEFINITIONS: readonly HarnessDefinition[] = [
     id: "codex",
     label: "OpenAI Codex",
     kind: "agent",
-    rules: [{ binaries: ["codex"] }, { paths: ["@openai/codex"] }],
+    rules: [{ binaries: ["codex"], excludePaths: ["codex.app/contents/macos/"] }, { paths: ["@openai/codex"] }],
   },
   {
     id: "opencode",
