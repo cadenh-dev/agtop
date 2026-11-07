@@ -4,6 +4,7 @@ import type { AcceleratorDevice, AcceleratorStatus, RawOsProcess } from "./types
 import type { AcceleratorProvider, RawEngineSample } from "./accelerators.js";
 
 export const NVML_SUCCESS = 0;
+export const NVML_ERROR_NOT_FOUND = 6;
 export const NVML_ERROR_INSUFFICIENT_SIZE = 7;
 export const NVML_ERROR_NOT_SUPPORTED = 3;
 const PROCESS_INFO_SIZE = 24;
@@ -37,6 +38,7 @@ export interface NvmlBinding {
   utilization(handle: unknown): { code: number; gpu?: number; memory?: number };
   processUtilization(handle: unknown, lastSeen: bigint, capacity?: number): { code: number; count: number; samples: NvmlProcessSample[] };
   computeProcesses(handle: unknown, capacity?: number): { code: number; count: number; processes: NvmlProcessInfo[] };
+  graphicsProcesses(handle: unknown, capacity?: number): { code: number; count: number; processes: NvmlProcessInfo[] };
 }
 export interface NvmlProviderOptions {
   exists?: () => Promise<boolean>;
@@ -58,6 +60,7 @@ function nativeBinding(): NvmlBinding {
   const getUtil = get("int nvmlDeviceGetUtilizationRates(void *device, _Out_ agtop_nvmlUtilization_t *utilization)");
   const getProcUtil = get("int nvmlDeviceGetProcessUtilization(void *device, _Out_ uint8_t *samples, _Inout_ uint32_t *count, uint64_t lastSeenTimestamp)");
   const getCompute = get("int nvmlDeviceGetComputeRunningProcesses_v3(void *device, _Inout_ uint32_t *count, _Out_ uint8_t *infos)");
+  const getGraphics = get("int nvmlDeviceGetGraphicsRunningProcesses_v3(void *device, _Inout_ uint32_t *count, _Out_ uint8_t *infos)");
   const readCString = (buf: Buffer) => buf.toString("utf8", 0, Math.max(0, buf.indexOf(0)));
   return {
     init: () => init(), shutdown: () => shutdown(),
@@ -75,6 +78,12 @@ function nativeBinding(): NvmlBinding {
     computeProcesses(handle, capacity = 0) {
       const count = [capacity]; const buf = Buffer.alloc(Math.max(1, capacity) * PROCESS_INFO_SIZE);
       const code = getCompute(handle, count, buf);
+      const processes = Array.from({ length: code === 0 ? count[0] : 0 }, (_, i) => decodeNvmlProcessInfo(buf, i * PROCESS_INFO_SIZE));
+      return { code, count: count[0], processes };
+    },
+    graphicsProcesses(handle, capacity = 0) {
+      const count = [capacity]; const buf = Buffer.alloc(Math.max(1, capacity) * PROCESS_INFO_SIZE);
+      const code = getGraphics(handle, count, buf);
       const processes = Array.from({ length: code === 0 ? count[0] : 0 }, (_, i) => decodeNvmlProcessInfo(buf, i * PROCESS_INFO_SIZE));
       return { code, count: count[0], processes };
     },
@@ -134,16 +143,30 @@ export function createProvider(options?: NvmlProviderOptions): AcceleratorProvid
         if (procUtil.code === NVML_ERROR_INSUFFICIENT_SIZE && procUtil.count > 0) procUtil = binding.processUtilization(handle, priorSeen, procUtil.count);
         if (procUtil.code === NVML_ERROR_NOT_SUPPORTED) {
           status.push({ source: "nvml", kind: "gpu", available: false, reason: "not-supported", message: "Per-process GPU utilization is not supported by this NVIDIA device." });
-          const procs = binding.computeProcesses(handle);
-          const full = procs.code === NVML_ERROR_INSUFFICIENT_SIZE && procs.count > 0 ? binding.computeProcesses(handle, procs.count) : procs;
-          if (full.code === NVML_SUCCESS) for (const proc of full.processes) if (pids.has(proc.pid) && proc.usedGpuMemory < 0xffffffffffffffffn)
-            samples.push({ pid: proc.pid, deviceId, kind: "gpu", engine: "memory", memoryBytes: Number(proc.usedGpuMemory) });
-        } else if (procUtil.code === NVML_SUCCESS) {
-          for (const sample of procUtil.samples) {
-            if (pids.has(sample.pid)) samples.push({ pid: sample.pid, deviceId, kind: "gpu", engine: "compute", percent: sample.smUtil });
-            if (sample.timestamp > (lastSeen.get(deviceId) ?? 0n)) lastSeen.set(deviceId, sample.timestamp);
+          const getFullProcesses = (read: NvmlBinding["computeProcesses"]) => {
+            const initial = read.call(binding, handle);
+            return initial.code === NVML_ERROR_INSUFFICIENT_SIZE && initial.count > 0 ? read.call(binding, handle, initial.count) : initial;
+          };
+          const compute = getFullProcesses(binding.computeProcesses);
+          const graphics = getFullProcesses(binding.graphicsProcesses);
+          const memoryByPid = new Map<number, bigint>();
+          for (const result of [compute, graphics]) if (result.code === NVML_SUCCESS) for (const proc of result.processes) {
+            if (!pids.has(proc.pid) || proc.usedGpuMemory >= 0xffffffffffffffffn) continue;
+            if (proc.usedGpuMemory > (memoryByPid.get(proc.pid) ?? -1n)) memoryByPid.set(proc.pid, proc.usedGpuMemory);
           }
-        } else {
+          for (const [pid, memoryBytes] of memoryByPid) samples.push({ pid, deviceId, kind: "gpu", engine: "memory", memoryBytes: Number(memoryBytes) });
+        } else if (procUtil.code === NVML_SUCCESS) {
+          const newestByPid = new Map<number, NvmlProcessSample>();
+          let newestTimestamp = priorSeen;
+          for (const sample of procUtil.samples) {
+            if (sample.timestamp > newestTimestamp) newestTimestamp = sample.timestamp;
+            const previous = newestByPid.get(sample.pid);
+            if (!previous || sample.timestamp > previous.timestamp) newestByPid.set(sample.pid, sample);
+          }
+          if (newestTimestamp > priorSeen) lastSeen.set(deviceId, newestTimestamp);
+          for (const sample of newestByPid.values()) if (pids.has(sample.pid))
+            samples.push({ pid: sample.pid, deviceId, kind: "gpu", engine: "compute", percent: sample.smUtil });
+        } else if (procUtil.code !== NVML_ERROR_NOT_FOUND) {
           status.push({ source: "nvml", kind: "gpu", available: false, reason: "error", message: "NVIDIA process utilization could not be read." });
         }
       }
