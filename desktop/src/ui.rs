@@ -1001,7 +1001,9 @@ mod tests {
             }),
             processes: vec![crate::model::Process {
                 pid,
-                name: "codex".into(),
+                // Keep the process name aligned with the harness so search
+                // tests do not accidentally match unrelated fixtures.
+                name: harness.into(),
                 ..Default::default()
             }],
             ..Default::default()
