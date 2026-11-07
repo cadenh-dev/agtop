@@ -24,7 +24,7 @@ interface OwnedJob {
 
 const owned = new Map<string, OwnedJob>();
 
-const instructions = `agtop provides task-scoped OS containment. Use "run" for long-lived helpers or subagents that must not outlive the task; it returns a job ID. Use "wait" to wait for exit, "status" to inspect, and "kill" or "cleanup" before finishing. "kill" only accepts jobs created by this MCP session. agtop manages process lifetimes; it is not a security sandbox.`;
+const instructions = `agtop provides task-scoped OS containment and classifies process roles. Use "run" for long-lived helpers or subagents that must not outlive the task; it returns a job ID. Use "wait" to wait for exit, "status" to inspect roles and listening ports for owned jobs, and "kill" or "cleanup" before finishing. "kill" only accepts jobs created by this MCP session. agtop manages process lifetimes; it is not a security sandbox.`;
 
 function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
@@ -49,6 +49,7 @@ function summary(tree: AgentProcessTree) {
     rootPid: tree.rootPid,
     rootStartTime: tree.processes.find(p => p.pid === tree.rootPid)?.startTime,
     containmentMode: tree.containmentMode,
+    roleCounts: tree.roleCounts,
     backend: tree.backend,
     backendEvidence: tree.backendEvidence,
     peer: tree.userOrPeer,
@@ -104,15 +105,15 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
 
   server.registerTool("list", {
     title: "List agent trees",
-    description: "List known agent trees with harness, worktree, CPU, memory, and containment mode. Command lines are omitted for jobs this session does not own.",
-    inputSchema: { query: z.string().max(200).optional().describe("Filter by job, harness, peer, branch, backend, or containment mode.") },
+    description: "List known agent trees with harness, process role counts, worktree, CPU, memory, and containment mode. Command lines are omitted for jobs this session does not own.",
+    inputSchema: { query: z.string().max(200).optional().describe("Filter by job, harness, role, peer, branch, backend, or containment mode.") },
     annotations: { readOnlyHint: true },
   }, async ({ query }) => {
     try {
       const q = query?.toLowerCase();
       const jobs = (await listAgentTrees()).map(summary).filter(job => !q || [
         job.jobId, job.harness, job.label, job.peer, job.backend, job.containmentMode,
-        job.git?.repoRoot, job.git?.branch,
+        job.git?.repoRoot, job.git?.branch, ...Object.keys(job.roleCounts),
       ].some(value => value?.toLowerCase().includes(q)));
       return text({ jobs });
     } catch (e) {
@@ -141,6 +142,8 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
         value.processes = tree.processes.map(p => ({
           pid: p.pid, ppid: p.ppid, name: p.name, cmdline: p.cmdline,
           cpuPercent: Number(p.cpuPercent.toFixed(1)), memoryMb: Number(p.memoryMb.toFixed(1)),
+          role: p.role, roleEvidence: p.roleEvidence,
+          listening: (p.listeningSockets ?? []).map(socket => `${socket.address}:${socket.port}`),
         }));
       } else if (includeProcesses) {
         value.note = "Process details are only available for jobs created by this MCP session.";
@@ -153,7 +156,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
 
   server.registerTool("run", {
     title: "Run a contained task",
-    description: "Start a command in its own OS containment unit (Windows Job Object or Linux cgroup/process group). Returns a job ID. Output is discarded; use this for long-lived helpers, watchers, and subagents, not for commands whose stdout you need. Use wait, status, kill, or cleanup with the returned job ID.",
+    description: "Start a command in its own OS containment unit (Windows Job Object, Linux cgroup or process group, or macOS process group). Returns a job ID. Output is discarded; use this for long-lived helpers, watchers, and subagents, not for commands whose stdout you need. Use wait, status, kill, or cleanup with the returned job ID.",
     inputSchema: {
       command: z.string().min(1).max(4096).describe("Executable to launch. Script shims need an explicit interpreter."),
       args: z.array(z.string()).optional().describe("Exact argument array; no shell interpolation."),
@@ -259,18 +262,16 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
     inputSchema: {},
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   }, async () => {
-    const results: Array<Record<string, unknown>> = [];
-    for (const [jobId, job] of owned) {
-      if (job.exitCode !== undefined) {
-        results.push({ jobId, alreadyExited: true, exitCode: job.exitCode });
-        continue;
-      }
-      try {
-        results.push({ jobId, ...(await job.agent.terminate()) });
-      } catch (e) {
-        results.push({ jobId, error: e instanceof Error ? e.message : String(e) });
-      }
-    }
+    const jobs = [...owned.entries()].map(([jobId, job]) => ({ jobId, job, alreadyExited: job.exitCode !== undefined, exitCode: job.exitCode }));
+    const active = jobs.filter(item => !item.alreadyExited);
+    const settled = await Promise.allSettled(active.map(item => item.job.agent.terminate()));
+    let activeIndex = 0;
+    const results = jobs.map(({ jobId, job, alreadyExited, exitCode }): Record<string, unknown> => {
+      if (alreadyExited) return { jobId, alreadyExited: true, exitCode };
+      const result = settled[activeIndex++];
+      if (result.status === "rejected") return { jobId, error: result.reason instanceof Error ? result.reason.message : String(result.reason) };
+      return { jobId, ...result.value };
+    });
     pruneStaleJobs();
     return text({ jobs: results });
   });

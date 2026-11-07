@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
+import { ROLE_ORDER } from "../src/roles.js";
 
 const exec = promisify(execFile);
 const repoRoot = path.resolve(import.meta.dir, "..");
@@ -25,6 +26,7 @@ const TREE_FIELDS = [
   "totalCpuPercent",
   "totalMemoryMb",
   "processes",
+  "roleCounts",
 ] as const;
 
 const PROCESS_FIELDS = [
@@ -36,6 +38,9 @@ const PROCESS_FIELDS = [
   "cpuSeconds",
   "cpuPercent",
   "memoryMb",
+  "role",
+  "roleSource",
+  "roleEvidence",
 ] as const;
 
 function baseEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
@@ -104,7 +109,7 @@ describe("agtop CLI subprocess", () => {
   test("--help exits 0 and lists commands", async () => {
     const { code, stdout } = await runCli(["--help"]);
     expect(code).toBe(0);
-    for (const snippet of ["agtop ps", "agtop run", "agtop kill", "agtop harnesses", "agtop lemonade", "agtop daemon", "agtop mcp", "agtop ui"]) {
+    for (const snippet of ["agtop ps", "agtop run", "agtop kill", "agtop harnesses", "agtop roles", "agtop lemonade", "agtop daemon", "agtop mcp", "agtop ui", "macOS uses a process group"]) {
       expect(stdout).toContain(snippet);
     }
   });
@@ -144,6 +149,8 @@ describe("agtop CLI subprocess", () => {
       expect(Array.isArray(processes)).toBe(true);
       expect(processes.length).toBeGreaterThan(0);
       for (const key of PROCESS_FIELDS) expect(processes[0]).toHaveProperty(key);
+      expect(tree!.roleCounts).toBeDefined();
+      expect(processes.find(p => p.pid === tree!.rootPid)).toMatchObject({ role: "agent", roleSource: "job" });
     } finally {
       supervisor.kill("SIGTERM");
       await Promise.race([new Promise<void>(r => supervisor.once("exit", () => r())), delay(5000)]);
@@ -158,6 +165,17 @@ describe("agtop CLI subprocess", () => {
     expect(catalog.length).toBeGreaterThan(0);
     expect(catalog.every(h => `${h.id} ${h.label} ${h.kind}`.toLowerCase().includes("codex"))).toBe(true);
     expect(catalog.some(h => h.id === "codex")).toBe(true);
+  });
+
+  test("roles supports catalog JSON and substring filtering", async () => {
+    const all = await runCli(["roles", "--json"]);
+    expect(all.code).toBe(0);
+    const catalog = JSON.parse(all.stdout) as Array<{ role: string }>;
+    expect(catalog.map(item => item.role)).toEqual([...ROLE_ORDER]);
+    const matching = await runCli(["roles", "mcp"]);
+    expect(matching.code).toBe(0);
+    expect(matching.stdout).toContain("mcp-server");
+    expect(matching.stdout).not.toContain("dev-server");
   });
 
   test("bare agtop with redirected stdout prints a snapshot and exits", async () => {

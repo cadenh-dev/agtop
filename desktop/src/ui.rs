@@ -16,8 +16,21 @@ actions!(
     [NextFocus, PreviousFocus, Refresh, NewAgent, Dismiss, Quit]
 );
 
-const NEW_AGENT_SHORTCUT: &str = "ctrl-n";
-const REFRESH_SHORTCUT: &str = "ctrl-r";
+const NEW_AGENT_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "cmd-n"
+} else {
+    "ctrl-n"
+};
+const REFRESH_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "cmd-r"
+} else {
+    "ctrl-r"
+};
+const QUIT_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "cmd-q"
+} else {
+    "ctrl-q"
+};
 const DISMISS_SHORTCUT: &str = "escape";
 
 struct LaunchForm {
@@ -34,6 +47,7 @@ pub struct Workbench {
     harnesses: Vec<Harness>,
     selected: Option<String>,
     filter: u8,
+    role_filter: Option<String>,
     search: Entity<TextInput>,
     commands: Sender<Command>,
     events: Receiver<Event>,
@@ -70,6 +84,7 @@ impl Workbench {
             harnesses: fallback_harnesses(),
             selected: None,
             filter: 0,
+            role_filter: None,
             search,
             commands,
             events,
@@ -250,6 +265,17 @@ impl Workbench {
     }
     fn navigation(&self, cx: &Context<Self>) -> Div {
         let managed = self.agents.iter().filter(|a| a.managed()).count();
+        let mut roles = crate::model::ROLE_ORDER
+            .iter()
+            .filter_map(|role| {
+                let count: u32 = self
+                    .agents
+                    .iter()
+                    .map(|agent| agent.role_counts.get(*role).copied().unwrap_or(0))
+                    .sum();
+                (count > 0).then_some((*role, count))
+            })
+            .collect::<Vec<_>>();
         div()
             .w(px(196.))
             .flex_shrink_0()
@@ -293,6 +319,27 @@ impl Workbench {
                     .justify_start()
                 }),
             )
+            .child(Self::caption("Roles").mt_3())
+            .children(roles.drain(..).map(|(role, count)| {
+                let role_id = role.to_owned();
+                let active = self.role_filter.as_deref() == Some(role);
+                Self::action(
+                    ("role-nav", role),
+                    format!("{}   {}", crate::model::role_label(role), count),
+                    active,
+                    move |this, _, cx| {
+                        this.role_filter = if this.role_filter.as_deref() == Some(&role_id) {
+                            None
+                        } else {
+                            Some(role_id.clone())
+                        };
+                        this.form = None;
+                        cx.notify();
+                    },
+                    cx,
+                )
+                .justify_start()
+            }))
             .child(div().flex_1())
             .child(Self::caption("Local inference"))
             .child(div().text_size(px(14.)).mt_1().child(
@@ -395,7 +442,12 @@ impl Workbench {
     }
     fn list(&self, cx: &Context<Self>) -> Div {
         let query = self.search.read(cx).content.as_ref();
-        let agents = filtered_agents(&self.agents, query, self.filter);
+        let agents = filtered_agents(
+            &self.agents,
+            query,
+            self.filter,
+            self.role_filter.as_deref(),
+        );
         div()
             .w(px(340.))
             .flex_shrink_0()
@@ -622,6 +674,7 @@ impl Workbench {
                                     .child(Self::fact("Peer", agent.user_or_peer.clone())),
                             )
                             .child(Self::fact("Containment", agent.containment_mode.clone()))
+                            .child(Self::fact("Roles", agent.role_summary()))
                             .child(Self::fact("Backend", agent.backend.clone()))
                             .child(Self::caption(agent.backend_evidence.clone()))
                             .child(Self::fact("Root command", root_command).font_family(MONO)),
@@ -640,43 +693,67 @@ impl Workbench {
                             .text_size(px(12.))
                             .text_color(color(MUTED))
                             .child(div().flex_1().child("Process"))
+                            .child(div().w(px(120.)).child("Role"))
                             .child(div().w(px(64.)).child("PID"))
                             .child(div().w(px(64.)).child("CPU"))
                             .child(div().w(px(84.)).child("Memory")),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .children(agent.process_rows().into_iter().map(|(depth, p)| {
-                                div()
-                                    .flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .py_3()
-                                    .px_3()
-                                    .border_b_1()
-                                    .border_color(color(LINE))
-                                    .text_size(px(12.))
-                                    .font_family(MONO)
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .pl(px(depth as f32 * 14.))
-                                            .truncate()
-                                            .child(format!(
-                                                "{}{}",
-                                                if depth > 0 { "└ " } else { "" },
-                                                p.name
-                                            )),
-                                    )
-                                    .child(div().w(px(64.)).child(p.pid.to_string()))
-                                    .child(div().w(px(64.)).child(format!("{:.1}%", p.cpu_percent)))
-                                    .child(
-                                        div().w(px(84.)).child(format!("{:.0} MiB", p.memory_mb)),
-                                    )
-                            })),
+                        div().flex().flex_col().children(
+                            agent.process_rows().into_iter().enumerate().map(
+                                |(index, (depth, p))| {
+                                    let evidence = p.role_evidence.clone();
+                                    let role_color = match p.role.as_str() {
+                                        "agent" | "subagent" => ACCENT,
+                                        "shell" | "tool" => MUTED,
+                                        _ => TEXT,
+                                    };
+                                    div()
+                                        .id(("process", index))
+                                        .flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .py_3()
+                                        .px_3()
+                                        .border_b_1()
+                                        .border_color(color(LINE))
+                                        .text_size(px(12.))
+                                        .font_family(MONO)
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .pl(px(depth as f32 * 14.))
+                                                .truncate()
+                                                .child(format!(
+                                                    "{}{}",
+                                                    if depth > 0 { "└ " } else { "" },
+                                                    p.name
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(120.))
+                                                .text_color(color(role_color))
+                                                .tooltip(move |_, cx| {
+                                                    cx.new(|_| RoleTooltip(evidence.clone())).into()
+                                                })
+                                                .child(p.role.clone()),
+                                        )
+                                        .child(div().w(px(64.)).child(p.pid.to_string()))
+                                        .child(
+                                            div()
+                                                .w(px(64.))
+                                                .child(format!("{:.1}%", p.cpu_percent)),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(84.))
+                                                .child(format!("{:.0} MiB", p.memory_mb)),
+                                        )
+                                },
+                            ),
+                        ),
                     ),
             )
     }
@@ -732,7 +809,12 @@ fn fallback_harnesses() -> Vec<Harness> {
     .collect()
 }
 
-fn filtered_agents<'a>(agents: &'a [Agent], query: &str, filter: u8) -> Vec<&'a Agent> {
+fn filtered_agents<'a>(
+    agents: &'a [Agent],
+    query: &str,
+    filter: u8,
+    role: Option<&str>,
+) -> Vec<&'a Agent> {
     agents
         .iter()
         .filter(|agent| {
@@ -740,8 +822,22 @@ fn filtered_agents<'a>(agents: &'a [Agent], query: &str, filter: u8) -> Vec<&'a 
                 && (filter == 0
                     || (filter == 1 && agent.managed())
                     || (filter == 2 && !agent.managed()))
+                && role.map_or(true, |role| agent.has_role(role))
         })
         .collect()
+}
+
+struct RoleTooltip(SharedString);
+
+impl Render for RoleTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .p_2()
+            .rounded_md()
+            .bg(color(RAISED))
+            .text_size(px(12.))
+            .child(self.0.clone())
+    }
 }
 
 // None means the selection still exists; Some(None) means the snapshot is empty.
@@ -777,12 +873,14 @@ fn cancel_confirmation() -> Option<Agent> {
 enum WorkbenchAction {
     NewAgent,
     Refresh,
+    Quit,
 }
 
 fn shortcut_action(shortcut: &str) -> Option<WorkbenchAction> {
     match shortcut {
         NEW_AGENT_SHORTCUT => Some(WorkbenchAction::NewAgent),
         REFRESH_SHORTCUT => Some(WorkbenchAction::Refresh),
+        QUIT_SHORTCUT => Some(WorkbenchAction::Quit),
         _ => None,
     }
 }
@@ -966,7 +1064,11 @@ impl Render for Workbench {
                             } else {
                                 "Connecting to local manager"
                             })
-                            .child("Ctrl+N  New agent     Ctrl+R  Refresh"),
+                            .child(if cfg!(target_os = "macos") {
+                                "⌘N  New agent     ⌘R  Refresh"
+                            } else {
+                                "Ctrl+N  New agent     Ctrl+R  Refresh"
+                            }),
                     ),
             )
     }
@@ -980,7 +1082,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(REFRESH_SHORTCUT, Refresh, None),
         KeyBinding::new(NEW_AGENT_SHORTCUT, NewAgent, None),
         KeyBinding::new(DISMISS_SHORTCUT, Dismiss, None),
-        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new(QUIT_SHORTCUT, Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
@@ -988,11 +1090,11 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        WorkbenchAction, cancel_confirmation, fallback_harnesses, filtered_agents,
-        matching_harnesses, refreshed_selection, request_stop, shortcut_action,
-        validate_launch_arguments,
+        NEW_AGENT_SHORTCUT, QUIT_SHORTCUT, REFRESH_SHORTCUT, WorkbenchAction, cancel_confirmation,
+        fallback_harnesses, filtered_agents, matching_harnesses, refreshed_selection, request_stop,
+        shortcut_action, validate_launch_arguments,
     };
-    use crate::model::Agent;
+    use crate::model::{Agent, ROLE_ORDER, role_label};
 
     fn agent(id: &str, harness: &str, branch: &str, pid: u32) -> Agent {
         Agent {
@@ -1021,10 +1123,40 @@ mod tests {
             agent("job-1", "codex", "feature/ui", 4101),
             agent("job-2", "claude", "main", 5202),
         ];
-        assert_eq!(filtered_agents(&agents, "codex", 0).len(), 1);
-        assert_eq!(filtered_agents(&agents, "FEATURE/UI", 0)[0].job_id, "job-1");
-        assert_eq!(filtered_agents(&agents, "5202", 0)[0].job_id, "job-2");
-        assert!(filtered_agents(&agents, "missing", 0).is_empty());
+        assert_eq!(filtered_agents(&agents, "codex", 0, None).len(), 1);
+        assert_eq!(
+            filtered_agents(&agents, "FEATURE/UI", 0, None)[0].job_id,
+            "job-1"
+        );
+        assert_eq!(filtered_agents(&agents, "5202", 0, None)[0].job_id, "job-2");
+        assert!(filtered_agents(&agents, "missing", 0, None).is_empty());
+    }
+
+    #[test]
+    fn role_filter_keeps_agents_with_the_selected_role() {
+        let mut first = agent("job-1", "codex", "main", 100);
+        first.role_counts.insert("agent".into(), 1);
+        first.role_counts.insert("dev-server".into(), 2);
+        let mut second = agent("job-2", "claude", "main", 200);
+        second.role_counts.insert("agent".into(), 1);
+        let agents = vec![first, second];
+        assert_eq!(filtered_agents(&agents, "", 0, Some("dev-server")).len(), 1);
+        assert_eq!(
+            filtered_agents(&agents, "", 0, Some("dev-server"))[0].job_id,
+            "job-1"
+        );
+    }
+
+    #[test]
+    fn role_summary_and_role_search_follow_role_catalog() {
+        let mut value = agent("job", "codex", "main", 100);
+        value.role_counts.insert("tool".into(), 4);
+        value.role_counts.insert("agent".into(), 1);
+        value.role_counts.insert("dev-server".into(), 2);
+        assert_eq!(value.role_summary(), "agent 1, dev-server 2, tool 4");
+        assert_eq!(ROLE_ORDER.len(), 13);
+        assert_eq!(role_label("dev-server"), "Dev server");
+        assert!(value.matches("dev-server"));
     }
 
     #[test]
@@ -1074,9 +1206,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_n_maps_to_open_launch_form_action() {
-        assert_eq!(shortcut_action("ctrl-n"), Some(WorkbenchAction::NewAgent));
-        assert_eq!(shortcut_action("ctrl-r"), Some(WorkbenchAction::Refresh));
-        assert_eq!(shortcut_action("ctrl-q"), None);
+    fn platform_shortcuts_map_to_actions() {
+        assert_eq!(
+            shortcut_action(NEW_AGENT_SHORTCUT),
+            Some(WorkbenchAction::NewAgent)
+        );
+        assert_eq!(
+            shortcut_action(REFRESH_SHORTCUT),
+            Some(WorkbenchAction::Refresh)
+        );
+        assert_eq!(shortcut_action(QUIT_SHORTCUT), Some(WorkbenchAction::Quit));
     }
 }

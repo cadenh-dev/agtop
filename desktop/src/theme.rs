@@ -9,12 +9,16 @@ pub const TEXT: u32 = 0xe6eee8;
 pub const MUTED: u32 = 0x9aafa0;
 pub const ACCENT: u32 = 0xc7ef91;
 pub const DANGER: u32 = 0xf19a8c;
-pub const FONT: &str = if cfg!(target_os = "windows") {
+pub const FONT: &str = if cfg!(target_os = "macos") {
+    ".SystemUIFont"
+} else if cfg!(target_os = "windows") {
     "Segoe UI"
 } else {
     "DejaVu Sans"
 };
-pub const MONO: &str = if cfg!(target_os = "windows") {
+pub const MONO: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else if cfg!(target_os = "windows") {
     "Consolas"
 } else {
     "DejaVu Sans Mono"

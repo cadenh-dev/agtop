@@ -7,6 +7,7 @@ import { probeLemonade } from "./backend.js";
 import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
 import { searchHarnesses } from "./harnesses.js";
+import { ROLE_ORDER, roleCatalog } from "./roles.js";
 import { startMcpServer } from "./mcp.js";
 import { pruneStaleJobs } from "./registry.js";
 import { WATCHDOG_ARG, runWatchdog } from "./watchdog.js";
@@ -21,6 +22,7 @@ const help = `agtop — agent-aware process manager
   agtop kill JOB_ID_OR_PID     Force-stop an agent tree
   agtop cleanup [--stale] [--dry-run] [--json]  Stop jobs or prune stale records
   agtop harnesses [QUERY] [--json]  List or search supported harnesses
+  agtop roles [QUERY] [--json]      List or search process roles
   agtop mcp [--peer NAME]      MCP stdio server for agent-facing task containment
   agtop lemonade [--json]      Probe local server and loaded models
   agtop daemon [--port 13309]  Authenticated loopback HTTP API
@@ -32,6 +34,7 @@ run options:
 
 Windows scripts need an explicit interpreter: -- cmd.exe /c codex.cmd
 Linux uses a process group unless a delegated cgroup root is supplied.
+macOS uses a process group with inherited tags; there is no atomic containment.
 Passive tree termination and process-group fallback are best effort.
 `;
 function clean(s: string) { return s.replace(/[\x00-\x1f\x7f-\x9f]/g, " "); }
@@ -40,11 +43,13 @@ export function renderTrees(trees: AgentProcessTree[]): string {
   return trees.map(t => {
     const git = t.git ? `${path.basename(t.git.repoRoot)} [${t.git.branch}]` : "worktree unknown";
     const rows = [`${t.harness}  ${t.jobId}  PID ${t.rootPid}`, `  ${t.totalCpuPercent.toFixed(1)}% CPU  ${t.totalMemoryMb.toFixed(1)} MiB  ${t.backend}  ${t.containmentMode}`, `  ${t.userOrPeer}  ${git}`];
+    const roleSummary = ROLE_ORDER.filter(role => (t.roleCounts[role] ?? 0) > 0).map(role => `${role} ${t.roleCounts[role]}`).join(", ");
+    rows.push(`  roles: ${roleSummary}`);
     const ids = new Map(t.processes.map(p => [p.pid, p]));
     for (const p of t.processes) {
       let depth = 0, parent = p.ppid; const seen = new Set<number>([p.pid]);
       while (ids.has(parent) && !seen.has(parent)) { seen.add(parent); depth++; parent = ids.get(parent)!.ppid; }
-      rows.push(`  ${"  ".repeat(Math.min(depth, 8))}${p.pid === t.rootPid ? "*" : "-"} ${p.pid} ${p.name}  ${p.cpuPercent.toFixed(1)}%  ${p.memoryMb.toFixed(1)} MiB`);
+      rows.push(`  ${"  ".repeat(Math.min(depth, 8))}${p.pid === t.rootPid ? "*" : "-"} ${p.pid} ${p.name}  ${p.role}  ${p.cpuPercent.toFixed(1)}%  ${p.memoryMb.toFixed(1)} MiB`);
     }
     return rows.map(clean).join("\n");
   }).join("\n\n") + "\n";
@@ -128,6 +133,20 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     else {
       const width = Math.max(...catalog.map(h => h.id.length));
       console.log(catalog.map(h => `${h.id.padEnd(width)}  ${h.kind.padEnd(6)}  ${h.label}`).join("\n") + "\n");
+    }
+    return;
+  }
+  if (command === "roles") {
+    const unknown = rest.filter(arg => arg !== "--json");
+    if (unknown.length > 1) throw new Error("Usage: agtop roles [QUERY] [--json]");
+    const query = unknown[0]?.toLowerCase();
+    const catalog = roleCatalog().filter(item => !query || [item.role, item.label, item.description, ...item.definitions]
+      .some(value => value.toLowerCase().includes(query)));
+    if (rest.includes("--json")) console.log(JSON.stringify(catalog, null, 2));
+    else if (!catalog.length) console.log(`No roles match "${unknown[0]}".\n`);
+    else {
+      const width = Math.max(...catalog.map(item => item.role.length));
+      console.log(catalog.map(item => `${item.role.padEnd(width)}  ${item.label}  ${item.description}`).join("\n") + "\n");
     }
     return;
   }

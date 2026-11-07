@@ -49,9 +49,10 @@ interface StatusBody {
   peer?: string;
   note?: string;
   rootPid?: number;
+  roleCounts?: Record<string, number>;
   exited?: boolean;
   exitCode?: number;
-  processes?: Array<{ pid: number; cmdline?: string }>;
+  processes?: Array<{ pid: number; cmdline?: string; role?: string; roleEvidence?: string; listening?: string[] }>;
 }
 interface ListBody { jobs: StatusBody[]; }
 interface WaitBody { jobId: string; exited: boolean; exitCode?: number; timedOut?: boolean; }
@@ -207,6 +208,7 @@ test("a second session cannot see, wait, or kill the first session's job", async
     const row = listed.jobs.find(job => job.jobId === id);
     expect(row, JSON.stringify(listed)).toBeDefined();
     expect(row?.owned).toBe(false);
+    expect(row?.roleCounts).toBeDefined();
     expect(row?.command).toBeUndefined();
     expect(JSON.stringify(listed)).not.toContain(value);
 
@@ -214,6 +216,7 @@ test("a second session cannot see, wait, or kill the first session's job", async
     expect(foreign.owned).toBe(false);
     expect(foreign.command).toBeUndefined();
     expect(foreign.processes).toBeUndefined();
+    expect(foreign.roleCounts).toBeDefined();
     expect(foreign.note).toBe("Process details are only available for jobs created by this MCP session.");
     expect(JSON.stringify(foreign)).not.toContain(value);
 
@@ -221,6 +224,9 @@ test("a second session cannot see, wait, or kill the first session's job", async
     expect(owner.owned).toBe(true);
     expect(owner.command).toBe(process.execPath);
     expect(owner.processes?.some(process => process.cmdline?.includes(value))).toBe(true);
+    expect(owner.processes?.every(process => typeof process.role === "string" && typeof process.roleEvidence === "string" && Array.isArray(process.listening))).toBe(true);
+    expect(owner.processes?.find(process => process.pid === owner.rootPid)?.role).toBe("agent");
+    expect(body<ListBody>(await invoke(a, "list", { query: "agent" })).jobs.some(job => job.jobId === id)).toBe(true);
 
     expectError(await invoke(b, "kill", { jobId: id }), /only jobs created by this MCP session can be stopped/);
     expectError(await invoke(b, "wait", { jobId: id, timeoutMs: 0 }), /only jobs created by this MCP session can be awaited/);
@@ -252,18 +258,25 @@ test("duplicate job ids are rejected across sessions and the original job keeps 
 
 test("cleanup stops only the jobs created by that session", async () => {
   const id = jobId("keep");
+  const secondId = jobId("keep");
   await withPair(async (a, b) => {
     const started = body<RunBody>(await invoke(a, "run", {
       command: process.execPath,
       args: ["-e", sleeper(marker("keep"))],
       jobId: id,
     }));
+    const second = body<RunBody>(await invoke(a, "run", {
+      command: process.execPath,
+      args: ["-e", sleeper(marker("keep-second"))],
+      jobId: secondId,
+    }));
     const cleaned = body<CleanupBody>(await invoke(b, "cleanup"));
     expect(cleaned.jobs).toEqual([]);
     expect(alive(started.pid)).toBe(true);
     const stopped = body<CleanupBody>(await invoke(a, "cleanup"));
-    expect(stopped.jobs.some(job => job.jobId === id)).toBe(true);
+    expect(stopped.jobs.map(job => job.jobId)).toEqual(expect.arrayContaining([id, secondId]));
     await waitUntil(() => !alive(started.pid), "owned process to exit after cleanup");
+    await waitUntil(() => !alive(second.pid), "second owned process to exit after cleanup");
   });
 }, 30000);
 

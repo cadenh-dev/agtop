@@ -1,4 +1,39 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+pub const ROLE_ORDER: &[&str] = &[
+    "agent",
+    "subagent",
+    "mcp-server",
+    "inference-server",
+    "dev-server",
+    "language-server",
+    "test-runner",
+    "build",
+    "package-manager",
+    "git",
+    "browser",
+    "shell",
+    "tool",
+];
+
+pub fn role_label(role: &str) -> &str {
+    match role {
+        "agent" => "Agent",
+        "subagent" => "Subagent",
+        "mcp-server" => "MCP server",
+        "inference-server" => "Inference server",
+        "dev-server" => "Dev server",
+        "language-server" => "Language server",
+        "test-runner" => "Test runner",
+        "build" => "Build",
+        "package-manager" => "Package manager",
+        "git" => "Version control",
+        "browser" => "Browser",
+        "shell" => "Shell",
+        _ => "Tool",
+    }
+}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,6 +45,12 @@ pub struct Process {
     pub start_time: String,
     pub cpu_percent: f64,
     pub memory_mb: f64,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub role_source: String,
+    #[serde(default)]
+    pub role_evidence: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -34,9 +75,26 @@ pub struct Agent {
     pub total_cpu_percent: f64,
     pub total_memory_mb: f64,
     pub processes: Vec<Process>,
+    #[serde(default)]
+    pub role_counts: BTreeMap<String, u32>,
 }
 
 impl Agent {
+    pub fn role_summary(&self) -> String {
+        ROLE_ORDER
+            .iter()
+            .filter_map(|role| {
+                self.role_counts
+                    .get(*role)
+                    .filter(|count| **count > 0)
+                    .map(|count| format!("{} {}", role, count))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    pub fn has_role(&self, role: &str) -> bool {
+        self.role_counts.get(role).is_some_and(|count| *count > 0)
+    }
     pub fn managed(&self) -> bool {
         self.containment_mode != "passive-ppid"
     }
@@ -51,12 +109,22 @@ impl Agent {
             .collect::<Vec<_>>()
             .join(" ");
         let text = format!(
-            "{} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {}",
             self.harness,
             self.job_id,
             self.root_pid,
             self.user_or_peer,
             self.backend,
+            self.role_counts
+                .keys()
+                .map(|role| format!("{} {}", role, role_label(role)))
+                .collect::<Vec<_>>()
+                .join(" "),
+            self.processes
+                .iter()
+                .map(|p| format!("{} {}", p.role, role_label(&p.role)))
+                .collect::<Vec<_>>()
+                .join(" "),
             self.git
                 .as_ref()
                 .map(|g| format!("{} {}", g.repo_root, g.branch))
@@ -164,7 +232,7 @@ pub fn parse_arguments(text: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Agent, GitInfo, Harness, Process, ROLE_ORDER, parse_arguments};
     #[test]
     fn arguments_preserve_paths_quotes_and_empty_values() {
         assert_eq!(
@@ -248,5 +316,49 @@ mod tests {
         assert!(harness.matches("claude"));
         assert!(harness.matches("agent"));
         assert!(!harness.matches("server"));
+    }
+
+    #[test]
+    fn roles_deserialize_and_legacy_payloads_default_roles() {
+        let with_roles: Agent = serde_json::from_str(
+            r#"{
+            "jobId":"j","harness":"codex","backend":"unknown","backendEvidence":"",
+            "userOrPeer":"p","rootPid":1,"containmentMode":"passive-ppid",
+            "totalCpuPercent":0,"totalMemoryMb":0,"processes":[{"pid":1,"ppid":0,"name":"codex",
+            "cmdline":"codex","startTime":"1","cpuPercent":0,"memoryMb":0,"role":"agent",
+            "roleSource":"job","roleEvidence":"root of job j"}],"roleCounts":{"agent":1}
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(with_roles.processes[0].role, "agent");
+        assert_eq!(with_roles.processes[0].role_source, "job");
+        assert_eq!(with_roles.role_summary(), "agent 1");
+        assert!(with_roles.has_role("agent"));
+
+        let legacy: Agent = serde_json::from_str(
+            r#"{
+            "jobId":"j","harness":"codex","backend":"unknown","backendEvidence":"",
+            "userOrPeer":"p","rootPid":1,"containmentMode":"passive-ppid",
+            "totalCpuPercent":0,"totalMemoryMb":0,"processes":[{"pid":1,"ppid":0,"name":"codex",
+            "cmdline":"codex","startTime":"1","cpuPercent":0,"memoryMb":0}]
+        }"#,
+        )
+        .unwrap();
+        assert!(legacy.role_counts.is_empty());
+        assert_eq!(legacy.processes[0].role, "");
+        assert_eq!(ROLE_ORDER.len(), 13);
+    }
+
+    #[test]
+    fn role_summary_uses_role_order_and_omits_zero_counts() {
+        let mut agent = Agent::default();
+        agent.role_counts.insert("tool".into(), 2);
+        agent.role_counts.insert("agent".into(), 1);
+        agent.role_counts.insert("shell".into(), 0);
+        assert_eq!(agent.role_summary(), "agent 1, tool 2");
+        assert!(agent.matches("dev-server") == false);
+        agent.role_counts.insert("dev-server".into(), 1);
+        assert!(agent.matches("dev-server"));
+        assert!(agent.matches("Dev server"));
     }
 }
