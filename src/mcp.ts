@@ -6,13 +6,12 @@ import { probeLemonade } from "./backend.js";
 import { pruneStaleJobs } from "./registry.js";
 import { searchHarnesses, harnesses, harnessLabel } from "./harnesses.js";
 import { killAgentTree, listAgentTrees, spawnContainedAgent } from "./manager.js";
+import { formatEndpoint } from "./net-format.js";
 import type { AgentProcessTree, HarnessType, ManagedAgent } from "./types.js";
 
 const VERSION = "0.1.0";
 
-export function formatListeningEndpoint(address: string, port: number): string {
-  return address.includes(":") ? `[${address}]:${port}` : `${address}:${port}`;
-}
+export const formatListeningEndpoint = formatEndpoint;
 
 export function cleanupResults<T>(
   jobs: Array<{ jobId: string; alreadyExited?: boolean; exitCode?: number }>,

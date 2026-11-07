@@ -119,7 +119,6 @@ Classification checks nested job tags, MCP rules, the harness catalog, other com
 
 Roles are hints from process names, executable paths, safe command anchors, tree position, tags, and listeners. In-process subagents such as an agent's internal task tool are invisible. Cwd-only harness detection is not applied to nested processes, so `text-generation-webui` is not recognized as a nested inference server. `npm run dev` is classified as `package-manager`; its server child can be a `dev-server`. Docker-launched MCP servers are `tool`. A listening socket indicates a listener, not activity, model execution, or hardware use.
 
-Socket evidence currently formats IPv6 role endpoints without brackets (for example, `::1:3000`), so the host and port can be ambiguous. MCP `listening` values use bracketed IPv6 notation.
 
 ### Recognition
 
