@@ -26,18 +26,21 @@ const ROLE_SHELLS = new Set([
 ]);
 const WRAPPER_SUBCOMMANDS = new Set(["run", "tool", "exec", "x", "dlx"]);
 const INLINE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-const PACKAGE_SPEC = /^(?:(@[^/@\s]+\/[^/@\s]+)|([^/@\s]+))(?:@[^/\s]*|==[^/\s]*)$/;
-const UNSAFE_ROLE_TOKEN = /[\s"'();]/;
+const PACKAGE_SPEC = /^(?:(@[^/@\\\s]+\/[^/@\\\s]+)|([^/@\\\s]+))(?:@[^/\\\s]*|==[^/\\\s]*)$/;
+const UNSAFE_ROLE_TOKEN = /["'();\r\n]/;
 
 function isValueTakingFlag(token: string): boolean {
-  return SKIP_NEXT.has(token) || /^-[A-Za-z]{2,}$/.test(token) && /[epcrCXW]$/.test(token);
+  if (SKIP_NEXT.has(token)) return true;
+  if ((token.startsWith("-W") || token.startsWith("-X")) && token.length > 2) return false;
+  return /^-[A-Za-z]{2,}$/.test(token) && /[epcrC]$/.test(token);
 }
 
 function isSafeRoleToken(token: string): boolean {
-  return !UNSAFE_ROLE_TOKEN.test(token);
+  if (UNSAFE_ROLE_TOKEN.test(token)) return false;
+  return !/\s/.test(token) || /[\\/]|\.(?:[cm]?[jt]s|jsx|tsx|pyw?|rb|pl|php|sh|bash|zsh|fish|ps1|cmd|bat|exe|jar)$/i.test(token);
 }
 
-/** Split a Windows command line using CommandLineToArgvW quote and backslash rules. */
+/** Split a Windows command line using the modern MSVC C runtime argv rules. */
 function windowsArgv(commandLine: string): string[] {
   const result: string[] = [];
   let i = 0;
@@ -90,12 +93,14 @@ function positional(list: readonly string[]): string[] {
       continue;
     }
     if (token.startsWith("-")) continue;
-    if (isSafeRoleToken(token)) result.push(token.toLowerCase());
+    if (!isSafeRoleToken(token)) break;
+    result.push(token.toLowerCase());
   }
   return result;
 }
 
 function stripPackageSpec(token: string): string {
+  if (token.includes("/") || token.includes("\\")) return token;
   const match = PACKAGE_SPEC.exec(token);
   return match ? (match[1] ?? match[2]) : token;
 }
@@ -143,11 +148,13 @@ export function analyzeCommand(p: Pick<RawOsProcess, "name" | "cmdline" | "argv"
   let skippedWrapperSubcommand = false;
   for (let i = 0; i < entry.length; i++) {
     const token = entry[i];
-    if (token === "-m" && i + 1 < entry.length && isRoleInterpreter(base(exe)) && isSafeRoleToken(entry[i + 1])) {
-      facts.module = {
-        name: entry[i + 1].toLowerCase().replace(/\\/g, "/"),
-        rest: positional(entry.slice(i + 2)),
-      };
+    if (token === "-m" && isRoleInterpreter(base(exe))) {
+      if (i + 1 < entry.length && isSafeRoleToken(entry[i + 1])) {
+        facts.module = {
+          name: entry[i + 1].toLowerCase().replace(/\\/g, "/"),
+          rest: positional(entry.slice(i + 2)),
+        };
+      }
       break;
     }
     if (isValueTakingFlag(token)) {
@@ -155,8 +162,8 @@ export function analyzeCommand(p: Pick<RawOsProcess, "name" | "cmdline" | "argv"
       continue;
     }
     if (token.startsWith("-")) continue;
-    if (!isSafeRoleToken(token)) continue;
     if (base(exe) === "env" && INLINE_ASSIGNMENT.test(token)) continue;
+    if (!isSafeRoleToken(token)) break;
     const isUvToolRun = base(exe) === "uv" && token.toLowerCase() === "tool" && entry[i + 1]?.toLowerCase() === "run";
     if (isUvToolRun) {
       skippedWrapperSubcommand = true;

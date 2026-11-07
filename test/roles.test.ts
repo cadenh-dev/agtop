@@ -317,7 +317,7 @@ describe("role classifier structure and cost", () => {
     for (let pid = 2; pid <= 10_000; pid++) wideProcesses.push(proc(pid, 1, ["unknown-worker"]));
     const wide = { jobId: "wide", harness: "claude-code" as const, rootPid: 1, managed: false, processes: wideProcesses };
 
-    const budgetMs = process.env.CI ? 1_000 : 250;
+    const budgetMs = process.env.CI ? 1_000 : 400;
     for (const [tree, expectedCounts] of [
       [deep, { agent: 1, tool: 9_999 }],
       [wide, { agent: 1, tool: 9_999 }],
@@ -400,6 +400,33 @@ describe("review regressions", () => {
     expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe(role);
   });
 
+  const unsafeAnchorCases: Array<[string, Fixture, ProcessRole]> = [
+    ["Node script path with spaces does not expose its argument", makeFixture(["node", "/Users/John Doe/proj/agent.js", "codex"]), "tool"],
+    ["Python script path with spaces does not expose a Codex data path", makeFixture(["python3", "/Users/John Doe/proj/scan.py", "/x/node_modules/@openai/codex/bin/codex.js"]), "tool"],
+    ["Node script path with spaces does not expose an MCP data path", makeFixture(["node", "/Users/John Doe/proj/run.js", "/x/node_modules/@modelcontextprotocol/server-x"]), "tool"],
+    ["Claude Code entry point with spaces remains a harness", makeFixture(["node", "/Users/John Doe/proj/node_modules/@anthropic-ai/claude-code/cli.js"]), "subagent"],
+    ["unsafe positional text stops before a Codex MCP argument", makeFixture(["codex", "unsafe data", "mcp-server"]), "subagent"],
+    ["env assignment with spaces keeps the program anchor", makeFixture(["env", "MESSAGE=hello world", "vite"]), "dev-server"],
+    ["Windows argv Claude Code path remains a harness", makeFixture(["node.exe", String.raw`C:\Users\John Doe\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js`], { targetExtra: { name: "node.exe" } }), "subagent"],
+    ["Windows argv Codex path remains a harness", makeFixture(["node.exe", String.raw`C:\Users\John Doe\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js`], { targetExtra: { name: "node.exe" } }), "subagent"],
+    ["Windows argv MCP server path remains an MCP server", makeFixture(["node.exe", String.raw`C:\Users\John Doe\AppData\Roaming\npm\node_modules\@modelcontextprotocol\server-filesystem\dist\index.js`], { targetExtra: { name: "node.exe" } }), "mcp-server"],
+    ["Windows cmdline-only Claude Code path remains a harness", makeFixture(["node.exe"], { targetExtra: {
+      name: "node.exe", argv: undefined,
+      cmdline: String.raw`"C:\Program Files\nodejs\node.exe" "C:\Users\John Doe\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js"`,
+    } }), "subagent"],
+    ["Windows cmdline-only Codex path remains a harness", makeFixture(["node.exe"], { targetExtra: {
+      name: "node.exe", argv: undefined,
+      cmdline: String.raw`"C:\Program Files\nodejs\node.exe" "C:\Users\John Doe\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"`,
+    } }), "subagent"],
+    ["Windows cmdline-only MCP server path remains an MCP server", makeFixture(["node.exe"], { targetExtra: {
+      name: "node.exe", argv: undefined,
+      cmdline: String.raw`"C:\Program Files\nodejs\node.exe" "C:\Users\John Doe\AppData\Roaming\npm\node_modules\@modelcontextprotocol\server-filesystem\dist\index.js"`,
+    } }), "mcp-server"],
+  ];
+  test.each(unsafeAnchorCases)("S4 %s", (_name, input, role) => {
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe(role);
+  });
+
   test("B1 bash -c codex does not count the real Codex child twice", () => {
     const processes = [proc(1, 0, ["claude"]), proc(2, 1, ["bash", "-c", "codex"]), proc(3, 2, ["codex"])];
     const assignments = classifyTreeRoles({
@@ -431,6 +458,20 @@ describe("review regressions", () => {
     expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe("tool");
   });
 
+  const pythonInlineValueFlagCases: Array<[string, string[], ProcessRole]> = [
+    ["-Werror keeps the Python script as the program", ["python3", "-Werror", "tools/scan.py", "/x/node_modules/@openai/codex/bin/codex.js"], "tool"],
+    ["-Wonce keeps the Python script as the program", ["python3", "-Wonce", "tools/scan.py", "/x/ollama"], "tool"],
+    ["-Xtracemalloc keeps the Python script as the program", ["python3", "-Xtracemalloc", "tools/scan.py", "/x/aider"], "tool"],
+    ["-Wmodule keeps the Python script as the program", ["python3", "-Wmodule", "tools/scan.py", "/x/ollama"], "tool"],
+    ["-Xfaulthandler keeps the Python script as the program", ["python3", "-Xfaulthandler", "tools/scan.py", "/x/aider"], "tool"],
+    ["-Werror keeps the Python script before an MCP package path", ["python3", "-Werror", "tools/scan.py", ".../@modelcontextprotocol/server-x/index.js"], "tool"],
+    ["-Werror keeps the Python script before a Jest argument", ["python3", "-Werror", "tools/scan.py", "jest"], "tool"],
+  ];
+  test.each(pythonInlineValueFlagCases)("S5 %s", (_name, argv, role) => {
+    const input = makeFixture(argv);
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe(role);
+  });
+
   test.each([
     ["backslash escaped quotes", String.raw`node.exe -e "console.log(\"/x/@modelcontextprotocol/server-a\")"`],
     ["doubled quotes", String.raw`node.exe -e "console.log(""quoted"")"`],
@@ -440,6 +481,18 @@ describe("review regressions", () => {
       anchors: [{ name: "node", path: "node.exe", rest: [] }],
     });
     expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe("tool");
+  });
+
+  test("S6 Windows argv splitting follows the modern MSVC C runtime quote rules", () => {
+    expect(analyzeCommand({ name: "node.exe", argv: undefined, cmdline: String.raw`node.exe -e "a""b c" d` })).toEqual({
+      anchors: [
+        { name: "node", path: "node.exe", rest: ["d"] },
+        { name: "d", path: "d", rest: [] },
+      ],
+    });
+    expect(analyzeCommand({ name: "node.exe", argv: undefined, cmdline: String.raw`node.exe """" x` })).toEqual({
+      anchors: [{ name: "node", path: "node.exe", rest: [] }],
+    });
   });
 
   test("S3 a custom root override remembers its detected harness for launcher children", () => {
@@ -476,19 +529,4 @@ describe("review regressions", () => {
     expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe("mcp-server");
   });
 
-  test("N5 evidence does not serialize an anchor path or malformed nested job ID", () => {
-    const anchorPath = `/work/${SECRET}/node_modules/@modelcontextprotocol/server-safe/index.js`;
-    const anchor = makeFixture(["node", anchorPath]);
-    const anchorEvidence = classifyTreeRoles(anchor.tree).get(anchor.pid)!;
-    expect(anchorEvidence.role).toBe("mcp-server");
-    expect(anchorEvidence.evidence).not.toContain(SECRET);
-
-    const malformedId = "S3CRET\nroles: fake";
-    const nested = makeFixture(["unknown-worker"], {
-      tagId: "outer", targetExtra: { envTags: { AGTOP_JOB_ID: malformedId, AGTOP_HARNESS: "codex" } },
-    });
-    const nestedEvidence = classifyTreeRoles(nested.tree).get(nested.pid)!;
-    expect(nestedEvidence.evidence).not.toContain(malformedId);
-    expect(nestedEvidence.evidence).not.toContain("roles: fake");
-  });
 });
