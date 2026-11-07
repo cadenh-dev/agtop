@@ -11,11 +11,12 @@ function units() {
   return linuxUnits ??= Promise.all([exec("getconf", ["CLK_TCK"]), exec("getconf", ["PAGESIZE"])]).then(([hz, page]) => ({ hz: Number(hz.stdout), page: Number(page.stdout) }));
 }
 export function parseLinuxStat(raw: string, hz: number, page: number): RawOsProcess {
+  const prefix = /^(\d+) \(/.exec(raw);
   const end = raw.lastIndexOf(")");
   const fields = raw.slice(end + 2).trim().split(/\s+/);
-  if (end < 0 || fields.length < 22) throw new Error("Malformed /proc stat");
-  const name = raw.slice(raw.indexOf("(") + 1, end);
-  return { pid: Number(raw.slice(0, raw.indexOf(" "))), ppid: Number(fields[1]), pgid: Number(fields[2]), name, cmdline: name, state: fields[0],
+  if (!prefix || end < prefix[0].length || raw[end + 1] !== " " || fields.length < 22) throw new Error("Malformed /proc stat");
+  const name = raw.slice(prefix[0].length, end);
+  return { pid: Number(prefix[1]), ppid: Number(fields[1]), pgid: Number(fields[2]), name, cmdline: name, state: fields[0],
     startTime: fields[19], cpuSeconds: (Number(fields[11]) + Number(fields[12])) / hz,
     cpuPercent: 0, memoryMb: Math.max(0, Number(fields[21])) * page / 1048576 };
 }
@@ -24,6 +25,7 @@ export function parseEnvironment(raw: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const pair of raw.split("\0")) {
     const eq = pair.indexOf("=");
+    if (eq < 0) continue;
     if (envKeys.has(pair.slice(0, eq))) result[pair.slice(0, eq)] = pair.slice(eq + 1);
   }
   return result;

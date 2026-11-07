@@ -52,7 +52,7 @@ describe("parseLinuxStat edges", () => {
     expect(parseLinuxStat(statLine(1, "a", { 11: "0", 12: "0" }), 50, 4096).cpuSeconds).toBe(0);
   });
 
-  test.todo("BUG: parseLinuxStat accepts a closing ')' with no opening '(' and keeps the pid inside comm. Fixture \"42 name) \" + 22 fields of \"0\" (hz 100, page 4096) returns pid 42 and name \"42 name\" instead of throwing \"Malformed /proc stat\".", () => {
+  test("rejects a closing ')' with no opening '('", () => {
     expect(() => parseLinuxStat(`42 name) ${Array(22).fill("0").join(" ")}`, 100, 4096)).toThrow("Malformed /proc stat");
   });
 });
@@ -68,7 +68,7 @@ describe("parseEnvironment edges", () => {
     });
   });
 
-  test.todo("BUG: parseEnvironment treats a NUL entry with no '=' as an allowlisted key when dropping the last character matches. Fixture \"AGTOP_JOB_IDX\\0\" returns {AGTOP_JOB_ID:\"AGTOP_JOB_IDX\"}; fixture \"OPENAI_BASE_URLX\\0\" returns {OPENAI_BASE_URL:\"OPENAI_BASE_URLX\"}.", () => {
+  test("ignores allowlist lookalikes without an equals sign", () => {
     expect(parseEnvironment("AGTOP_JOB_IDX\0")).toEqual({});
     expect(parseEnvironment("OPENAI_BASE_URLX\0")).toEqual({});
   });
@@ -194,7 +194,7 @@ describe("correlateTrees edges", () => {
     expect(taggedIds).toEqual({ "unmanaged-inner": [30, 40], "unmanaged-outer": [10, 20] });
   });
 
-  test.todo("BUG: overlapping nested job membership is claimed by whichever job is listed first, so an outer job hides the inner agent. Fixture: claude pid 10 -> bash 20 -> codex 30 -> node 40; jobs [outer members 10,20,30,40] then [inner members 30,40]. Observed: only outer with pids 10,20,30,40. Listing inner first yields both trees.", () => {
+  test("assigns overlapping managed members to the most specific job independent of job order", () => {
     const processes = [proc(10, 1, "claude", "10"), proc(20, 10, "bash", "20"), proc(30, 20, "codex", "30"), proc(40, 30, "node", "40")];
     const jobs = [
       job({ jobId: "outer", rootPid: 10, harness: "claude-code", startTime: "10", mode: "win32-job-object" }),
@@ -204,11 +204,15 @@ describe("correlateTrees edges", () => {
     const byId = Object.fromEntries(trees.map(tree => [tree.jobId, tree.processes.map(p => p.pid)]));
     expect(byId.outer).toEqual([10, 20]);
     expect(byId.inner).toEqual([30, 40]);
+    const reversed = correlateTrees(processes, [...jobs].reverse(), new Map([["outer", [10, 20, 30, 40]], ["inner", [30, 40]]]));
+    expect(Object.fromEntries(reversed.map(tree => [tree.jobId, tree.processes.map(p => p.pid)]))).toEqual(byId);
   });
 
-  test.todo("BUG: a Windows CreationDate that is not an integer string becomes startTime \"0\", and correlateTrees then drops the parent link because the parent looks newer. Fixture: codex pid 10 start \"1700000000000\", child pid 11 ppid 10 start \"0\". Observed tree pids [10]; the child is omitted.", () => {
+  test("keeps parent links when either process start time is unknown", () => {
     const trees = correlateTrees([proc(10, 1, "codex", "1700000000000"), proc(11, 10, "node", "0")], []);
     expect(trees[0]?.processes.map(p => p.pid)).toEqual([10, 11]);
+    const reused = correlateTrees([proc(10, 1, "codex", "1700000000000"), proc(11, 10, "node", "1600000000000")], []);
+    expect(reused[0]?.processes.map(p => p.pid)).toEqual([10]);
   });
 });
 
