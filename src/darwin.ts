@@ -1,6 +1,8 @@
 import path from "node:path";
 import koffi from "koffi";
-import { formatIpv4, formatIpv6, type TcpRow } from "./sockets.js";
+import type { TcpRow } from "./sockets.js";
+import { formatIpv4, formatIpv6 } from "./net-format.js";
+import { envKeys } from "./env-keys.js";
 import type { RawOsProcess } from "./types.js";
 
 const PROC_PIDLISTFDS = 1;
@@ -263,7 +265,9 @@ export function parseProcArgs2(buf: Buffer, length: number): { execPath: string;
   const execPath = buf.toString("utf8", cursor, pathEnd);
   if (!execPath) return;
   // KERN_PROCARGS2 can include a variable run of NUL padding after exec_path.
-  // An empty argv[0] is indistinguishable from this padding, so it is skipped.
+  // An empty argv[0] is indistinguishable from this padding, so it is skipped. In that case,
+  // the first environment string is read as an argument and appears in cmdline without passing
+  // through the environment allowlist, the same limitation as ps and psutil.
   cursor = pathEnd + 1;
   while (cursor < end && buf[cursor] === 0) cursor++;
   const argv: string[] = [];
@@ -328,7 +332,8 @@ function checkAbi(native: DarwinNative): void {
   let shortInfo: ReturnType<typeof parseShortBsdInfo>;
   try { shortInfo = parseShortBsdInfo(short.data); }
   catch (error) { abiFailure("proc_pidinfo(PROC_PIDT_SHORTBSDINFO)", String(error)); }
-  const expectedUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const expectedUid = typeof process.geteuid === "function" ? process.geteuid()
+    : typeof process.getuid === "function" ? process.getuid() : undefined;
   if (expectedUid !== undefined && info!.uid !== expectedUid) {
     abiFailure("proc_pidinfo(PROC_PIDTASKALLINFO)", `reported pbi_uid ${info!.uid}; expected ${expectedUid}`);
   }
@@ -461,14 +466,10 @@ function readBsdInfo(buf: Buffer): { pid: number; ppid: number; pgid: number; st
   };
 }
 
-const DARWIN_ENV_ALLOWLIST = new Set([
-  "AGTOP_JOB_ID", "AGTOP_HARNESS", "AGTOP_PEER", "AGTOP_WORKTREE", "AGTOP_BACKEND",
-  "OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL",
-]);
 function filteredDarwinEnvironment(env: string[]): string[] {
   return env.filter(entry => {
     const eq = entry.indexOf("=");
-    return eq >= 0 && DARWIN_ENV_ALLOWLIST.has(entry.slice(0, eq));
+    return eq >= 0 && envKeys.has(entry.slice(0, eq));
   });
 }
 

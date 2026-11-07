@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { RawOsProcess } from "./types.js";
 import { collectSocketConnections } from "./sockets.js";
+import { envKeys } from "./env-keys.js";
 import { DarwinScannerError, darwinScannerMode, parseDarwinPs, readDarwinProcesses, type DarwinNative } from "./darwin.js";
 export { detectHarness, harnesses, harnessCatalog, harnessKind, harnessLabel, isLocalHarness } from "./harnesses.js";
 export type { HarnessDefinition, HarnessKind, HarnessRule } from "./harnesses.js";
@@ -22,7 +23,6 @@ export function parseLinuxStat(raw: string, hz: number, page: number): RawOsProc
     startTime: fields[19], cpuSeconds: (Number(fields[11]) + Number(fields[12])) / hz,
     cpuPercent: 0, memoryMb: Math.max(0, Number(fields[21])) * page / 1048576 };
 }
-const envKeys = new Set(["AGTOP_JOB_ID", "AGTOP_HARNESS", "AGTOP_PEER", "AGTOP_WORKTREE", "AGTOP_BACKEND", "OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"]);
 export function parseEnvironment(raw: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const pair of raw.split("\0")) {

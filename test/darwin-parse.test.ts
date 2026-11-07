@@ -5,6 +5,9 @@ import {
   parseShortBsdInfo, parseSocketFdInfo, parseTaskAllInfo, parseVnodeCwd, machTicksToSeconds, readDarwinProcesses,
   type DarwinNative,
 } from "../src/darwin.js";
+
+const effectiveUid = () => typeof process.geteuid === "function" ? process.geteuid()
+  : typeof process.getuid === "function" ? process.getuid() : 501;
 import { collectSocketConnections } from "../src/sockets.js";
 import type { RawOsProcess } from "../src/types.js";
 
@@ -13,7 +16,7 @@ function taskInfo(input: { pid: number; ppid: number; pgid?: number; status?: nu
   buf.writeUInt32LE(input.status ?? 2, 4);
   buf.writeUInt32LE(input.pid, 12);
   buf.writeUInt32LE(input.ppid, 16);
-  buf.writeUInt32LE(input.uid ?? (typeof process.getuid === "function" ? process.getuid() : 501), 20);
+  buf.writeUInt32LE(input.uid ?? effectiveUid(), 20);
   Buffer.from(input.comm ?? "process").copy(buf, 48);
   Buffer.from(input.name ?? "process-name").copy(buf, 64);
   buf.writeUInt32LE(17, 96);
@@ -79,7 +82,7 @@ function success(data: Buffer) { return { data, bytes: data.length, errno: 0 }; 
 
 function fakeNative(pids: number[], overrides: Partial<DarwinNative> & { pidInfo?: DarwinNative["pidInfo"] } = {}): DarwinNative {
   const ownTask = taskInfo({ pid: process.pid, ppid: process.ppid, comm: "bun", name: "Bun" });
-  const ownShort = shortInfo({ pid: process.pid, ppid: process.ppid, uid: typeof process.getuid === "function" ? process.getuid() : 501 });
+  const ownShort = shortInfo({ pid: process.pid, ppid: process.ppid, uid: effectiveUid() });
   const native: DarwinNative = {
     timebase: { numer: 125, denom: 3 },
     listAllPids: () => pids,
@@ -225,7 +228,7 @@ describe("fake libproc scans", () => {
     const native = fakeNative([gone, reused, stable], {
       pidInfo(pid, flavor, size) {
         if (pid === process.pid && flavor === 2) return success(taskInfo({ pid, ppid: process.ppid }));
-        if (pid === process.pid && flavor === 13) return success(shortInfo({ pid, ppid: process.ppid, uid: typeof process.getuid === "function" ? process.getuid() : 501 }));
+        if (pid === process.pid && flavor === 13) return success(shortInfo({ pid, ppid: process.ppid, uid: effectiveUid() }));
         if (pid === gone && flavor === 2) return { data: Buffer.alloc(size), bytes: 0, errno: 3 };
         if ((pid === reused || pid === stable) && flavor === 2) return success(taskInfo({ pid, ppid: 1, sec: BigInt(pid) }));
         if (pid === reused && flavor === 3) return success(taskInfo({ pid, ppid: 1, sec: 999n }).subarray(0, 136));
@@ -254,14 +257,14 @@ describe("fake libproc scans", () => {
     const badShort = fakeNative([], {
       pidInfo(pid, flavor, size) {
         if (pid === process.pid && flavor === 13) return success(shortInfo({
-          pid: process.pid + 1, ppid: process.ppid, uid: typeof process.getuid === "function" ? process.getuid() : 501,
+          pid: process.pid + 1, ppid: process.ppid, uid: effectiveUid(),
         }));
         return baseline.pidInfo(pid, flavor, size);
       },
     });
     expect(() => readDarwinProcesses(badShort)).toThrow(/PROC_PIDT_SHORTBSDINFO.*AGTOP_DARWIN_SCANNER=ps/);
-    if (typeof process.getuid === "function") {
-      const uid = process.getuid();
+  if (typeof process.geteuid === "function" || typeof process.getuid === "function") {
+      const uid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid!();
       const badUid = fakeNative([], {
         pidInfo(pid, flavor, size) {
           if (pid === process.pid && flavor === 2) return success(taskInfo({ pid, ppid: process.ppid, uid: uid + 1 }));

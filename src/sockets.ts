@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises";
 import koffi from "koffi";
 import { darwinTcpRows } from "./darwin.js";
+import { formatIpv4, formatIpv6 } from "./net-format.js";
+export { formatIpv4, formatIpv6 } from "./net-format.js";
 import { detectHarness, harnessKind } from "./harnesses.js";
 import type { ListeningSocket, RawOsProcess, SocketConnection } from "./types.js";
 
@@ -44,13 +46,6 @@ export function isLoopback(address: string): boolean {
 }
 function addressText(address: string): string { return address === "0:0:0:0:0:0:0:1" ? "::1" : address; }
 function isWildcard(address: string): boolean { return address === "0.0.0.0" || address === "::" || address === "0:0:0:0:0:0:0:0"; }
-
-export function formatIpv4(bytes: Uint8Array): string { return [...bytes].join("."); }
-export function formatIpv6(bytes: Uint8Array): string {
-  const words = Array.from({ length: 8 }, (_, i) => ((bytes[i * 2] << 8) | bytes[i * 2 + 1]).toString(16));
-  if (words.slice(0, 5).every(word => word === "0") && words[5] === "ffff") return `::ffff:${formatIpv4(bytes.subarray(12, 16))}`;
-  return words.join(":");
-}
 
 export function listenersByPid(rows: TcpRow[]): Map<number, ListeningSocket[]> {
   const result = new Map<number, ListeningSocket[]>();
