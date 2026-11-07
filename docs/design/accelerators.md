@@ -42,7 +42,7 @@ export interface AcceleratorStatus {
   source: AcceleratorSource;
   kind: AcceleratorKind | "any";
   available: boolean;
-  reason?: string;            // machine-readable when unavailable: "no-devices" | "load-failed" | "not-supported" | "permission-denied" | "platform-limit" | "error"
+  reason?: string;            // machine-readable when unavailable: "no-devices" | "load-failed" | "not-supported" | "permission-denied" | "platform-limit" | "error" | "timeout"
   message?: string;           // one short human sentence, no paths with user names
 }
 
@@ -160,7 +160,7 @@ export interface AcceleratorProvider {
 | A4 macOS | `src/accel-darwin.ts`, registry line, `test/accel-darwin.test.ts` | A1 | xhigh |
 | A5 surfaces | `src/cli.ts`, `src/mcp.ts`, `src/daemon.ts`, `desktop/src/*.rs`, `README.md`, `skills/agtop/SKILL.md`, `test/cli.test.ts`, `test/mcp.test.ts`, `test/render.test.ts`, `test/docs.test.ts`, `test/daemon-security.test.ts` (route auth only) | A1 | high |
 
-A2–A5 run in parallel after A1 merges. The only shared file among A2–A4 is the one-line registry in `src/accelerators.ts`; to avoid conflicts, A1 pre-wires `providersFor()` with dynamic imports of `./accel-linux.js`, `./accel-nvml.js`, `./accel-windows.js`, `./accel-darwin.js` guarded by try/catch and platform, so A2–A4 never touch `accelerators.ts` (A1 ships stub files exporting `createProvider(): AcceleratorProvider | undefined` returning undefined; A2–A4 replace the stubs).
+A2–A5 run in parallel after A1 merges. The only shared file among A2–A4 is the one-line registry in `src/accelerators.ts`; to avoid conflicts, A1 pre-wires `providersFor()` with lazy, literal dynamic imports of `./accel-linux.js`, `./accel-nvml.js`, `./accel-windows.js`, and `./accel-darwin.js` guarded by try/catch and platform, so bundlers include the providers while importing `accelerators.ts` still loads nothing native. A2–A4 never touch `accelerators.ts` (A1 ships stub files exporting `createProvider(): AcceleratorProvider | undefined` returning undefined; A2–A4 replace the stubs).
 
 Global rules: never weaken existing tests; all CI legs (test + desktop × ubuntu/windows/macOS) green and blocking; evidence/messages contain no raw argv, cwd, or user paths; Koffi loads lazily; every provider failure degrades to a status, never an exception out of `listAgentTrees`.
 

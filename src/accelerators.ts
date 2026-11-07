@@ -31,27 +31,26 @@ let latestSnapshot: AcceleratorSnapshot | undefined;
 /** Returns the most recent completed accelerator sample, if sampling has run. */
 export function getAcceleratorSnapshot(): AcceleratorSnapshot | undefined { return latestSnapshot; }
 
-const sourceFor: Record<string, AcceleratorSource> = {
-  "./accel-linux.js": "linux-drm-fdinfo", "./accel-nvml.js": "nvml",
-  "./accel-windows.js": "windows-pdh", "./accel-darwin.js": "darwin-iokit",
-};
-
 /** Load platform providers only when the first sample is requested. */
 export async function providersFor(platform: string): Promise<ProviderLoad> {
-  const modules: string[] = platform === "linux" ? ["./accel-linux.js", "./accel-nvml.js"]
-    : platform === "win32" ? ["./accel-windows.js"]
-      : platform === "darwin" ? ["./accel-darwin.js"] : [];
   const providers: AcceleratorProvider[] = [];
   const status: AcceleratorStatus[] = [];
-  await Promise.all(modules.map(async specifier => {
+  const tryLoad = async (source: AcceleratorSource, load: () => Promise<{ createProvider(): AcceleratorProvider | undefined }>) => {
     try {
-      const mod = await import(specifier) as { createProvider(): AcceleratorProvider | undefined };
+      const mod = await load();
       const provider = mod.createProvider();
       if (provider) providers.push(provider);
     } catch {
-      status.push({ source: sourceFor[specifier], kind: "any", available: false, reason: "load-failed", message: "Accelerator provider could not be loaded." });
+      status.push({ source, kind: "any", available: false, reason: "load-failed", message: "Accelerator provider could not be loaded." });
     }
-  }));
+  };
+  // Keep imports literal for bundlers, but inside this function to avoid loading native code at module import time.
+  if (platform === "linux") await Promise.all([
+    tryLoad("linux-drm-fdinfo", () => import("./accel-linux.js")),
+    tryLoad("nvml", () => import("./accel-nvml.js")),
+  ]);
+  else if (platform === "win32") await tryLoad("windows-pdh", () => import("./accel-windows.js"));
+  else if (platform === "darwin") await tryLoad("darwin-iokit", () => import("./accel-darwin.js"));
   return { providers, status };
 }
 
@@ -64,10 +63,12 @@ export class AcceleratorSampler {
   private providerLoadStatus: AcceleratorStatus[];
   private readonly previous = new Map<string, PreviousCounter>();
   private constructorPromise?: Promise<void>;
+  private readonly providerTimeoutMs: number;
 
-  constructor(providers: AcceleratorProvider[] = [], loadStatus: AcceleratorStatus[] = []) {
+  constructor(providers: AcceleratorProvider[] = [], loadStatus: AcceleratorStatus[] = [], providerTimeoutMs = 2000) {
     this.providers = providers;
     this.providerLoadStatus = loadStatus;
+    this.providerTimeoutMs = providerTimeoutMs;
   }
 
   private async ensureProviders(): Promise<void> {
@@ -96,8 +97,18 @@ export class AcceleratorSampler {
     for (const tree of trees) for (const proc of tree.processes) processes.set(proc.pid, proc);
     const pids = new Set(processes.keys());
     const collected = await Promise.all(this.providers.map(async provider => {
-      try { return { provider, result: await provider.sample(pids, processes) }; }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<{ timedOut: true }>(resolve => {
+          timer = setTimeout(() => resolve({ timedOut: true }), this.providerTimeoutMs);
+          timer.unref?.();
+        });
+        const result = await Promise.race([provider.sample(pids, processes), timeout]);
+        if ("timedOut" in result) return { provider, timeout: true as const };
+        return { provider, result };
+      }
       catch { return { provider, error: true as const }; }
+      finally { if (timer) clearTimeout(timer); }
     }));
 
     const statuses = [...this.providerLoadStatus];
@@ -106,6 +117,10 @@ export class AcceleratorSampler {
     for (const item of collected) {
       if ("error" in item) {
         statuses.push({ source: item.provider.source, kind: "any", available: false, reason: "error", message: "Accelerator provider sampling failed." });
+        continue;
+      }
+      if ("timeout" in item) {
+        statuses.push({ source: item.provider.source, kind: "any", available: false, reason: "timeout", message: "Accelerator provider timed out." });
         continue;
       }
       raw.push(...item.result.samples.filter(sample => pids.has(sample.pid)));
@@ -122,7 +137,13 @@ export class AcceleratorSampler {
       const startTime = sample.startTime ?? processes.get(sample.pid)?.startTime ?? "";
       const key = `${sample.pid}|${startTime}|${sample.deviceId}|${sample.engine}|${sample.clientKey ?? ""}`;
       const old = chosen.get(key);
-      if (!old || (sample.memoryBytes ?? -1) > (old.memoryBytes ?? -1)) chosen.set(key, sample);
+      if (!old) chosen.set(key, sample);
+      else chosen.set(key, {
+        ...old,
+        ...(old.percent === undefined && sample.percent === undefined ? {} : { percent: Math.max(old.percent ?? -Infinity, sample.percent ?? -Infinity) }),
+        ...(old.busyNs === undefined && sample.busyNs === undefined ? {} : { busyNs: old.busyNs === undefined ? sample.busyNs : sample.busyNs === undefined ? old.busyNs : old.busyNs > sample.busyNs ? old.busyNs : sample.busyNs }),
+        ...(old.memoryBytes === undefined && sample.memoryBytes === undefined ? {} : { memoryBytes: Math.max(old.memoryBytes ?? -Infinity, sample.memoryBytes ?? -Infinity) }),
+      });
     }
 
     const usageByPid = new Map<number, Map<string, { kind: AcceleratorKind; engineValues: Map<string, number> }>>();

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AcceleratorSampler, getAcceleratorSnapshot, type AcceleratorProvider, type RawEngineSample } from "../src/accelerators.js";
 import type { AgentProcess, AgentProcessTree } from "../src/types.js";
 import { listAgentTrees } from "../src/manager.js";
@@ -41,6 +44,25 @@ describe("accelerator sampling core", () => {
       { deviceId: "d0", kind: "gpu", utilizationPercent: 62.2, engine: "compute", memoryBytes: 200 },
       { deviceId: "d1", kind: "gpu", utilizationPercent: 100, engine: "copy" },
     ]);
+  });
+
+  test("same-engine collisions keep the greatest percent and memory", async () => {
+    const t = tree(processRecord(1));
+    await new AcceleratorSampler([provider([
+      { pid: 1, deviceId: "d", kind: "gpu", engine: "3d", percent: 10, memoryBytes: 100 },
+      { pid: 1, deviceId: "d", kind: "gpu", engine: "3d", percent: 80, memoryBytes: 50 },
+    ])]).sample([t], 1000);
+    expect(t.processes[0].accelerators?.[0]).toMatchObject({ utilizationPercent: 80, engine: "3d", memoryBytes: 100 });
+  });
+
+  test("timed-out providers do not block other results", async () => {
+    const hung: AcceleratorProvider = { source: "nvml", sample: () => new Promise(() => {}) };
+    const t = tree(processRecord(1));
+    const snapshot = await new AcceleratorSampler([
+      hung, provider([{ pid: 1, deviceId: "d", kind: "gpu", engine: "3d", percent: 42 }]),
+    ], [], 20).sample([t], 1000);
+    expect(snapshot.status).toContainEqual(expect.objectContaining({ source: "nvml", available: false, reason: "timeout", message: "Accelerator provider timed out." }));
+    expect(t.processes[0].accelerators?.[0]?.utilizationPercent).toBe(42);
   });
 
   test("shared client key is attributed once to the lowest in-tree PID", async () => {
@@ -105,6 +127,16 @@ describe("accelerator sampling core", () => {
     const code = readFileSync(new URL("../src/accelerators.ts", import.meta.url), "utf8") + modules.map((_, i) =>
       readFileSync(new URL(["../src/accel-linux.ts", "../src/accel-nvml.ts", "../src/accel-windows.ts", "../src/accel-darwin.ts"][i], import.meta.url), "utf8")).join("\n");
     expect(code).not.toMatch(/from\s+["']koffi["']|require\(["']koffi["']\)/);
+  });
+
+  test("literal provider imports are included in a Bun bundle", async () => {
+    const outdir = mkdtempSync(join(tmpdir(), "agtop-accelerators-bundle-"));
+    try {
+      const result = await Bun.build({ entrypoints: [fileURLToPath(new URL("../src/accelerators.ts", import.meta.url))], target: "bun", outdir });
+      expect(result.success).toBe(true);
+      const bundle = result.outputs.map(output => readFileSync(output.path, "utf8")).join("\n");
+      expect(bundle).toContain("// src/accel-windows.ts");
+    } finally { rmSync(outdir, { recursive: true, force: true }); }
   });
 
   test("listAgentTrees remains available when no provider is installed", async () => {
