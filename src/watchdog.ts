@@ -68,8 +68,15 @@ export async function launchWatchdog(cmd: WatchdogCommand, timeoutMs = 10_000): 
       cleanup();
       stdout.destroy();
       pipe.destroy();
-      child.kill("SIGKILL");
-      reject(new Error(`Crash-cleanup helper failed to start (exit ${code ?? "null"})`));
+      const error = new Error(`Crash-cleanup helper failed to start (exit ${code ?? "null"})`);
+      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+        try { child.kill("SIGKILL"); } catch {}
+        reject(error);
+        return;
+      }
+      const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+      try { child.kill("SIGKILL"); } catch {}
+      void Promise.race([exited, delay(1_000)]).then(() => reject(error));
     };
     const onData = (chunk: Buffer | string) => {
       output += String(chunk);
@@ -98,12 +105,98 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function runWatchdog(args: string[], ops?: PosixOps): Promise<number> {
+export interface WatchdogIo {
+  isControlPipe(): boolean;
+  sendReady(): void;
+  waitForManager(): void;
+}
+
+export interface WatchdogCleanupOptions {
+  deadlineMs?: number;
+  maxPermissionFailures?: number;
+  scanDelayMs?: number;
+}
+
+const watchdogIo: WatchdogIo = {
+  isControlPipe() {
+    try {
+      const stat = fs.fstatSync(3);
+      return stat.isFIFO() || stat.isSocket();
+    } catch { return false; }
+  },
+  sendReady() { fs.writeSync(1, "ready\n"); },
+  waitForManager() {
+    const byte = Buffer.alloc(1);
+    try { while (fs.readSync(3, byte, 0, 1, null) > 0) {} } catch { /* A broken pipe means the manager exited. */ }
+  },
+};
+
+/** Clean up a dead manager's processes, while bounding permission and scan failures. */
+export async function cleanupWatchdog(pgid: number, jobId: string, ops: PosixOps, options: WatchdogCleanupOptions = {}): Promise<number> {
+  const deadlineMs = options.deadlineMs ?? 60_000;
+  const maxPermissionFailures = options.maxPermissionFailures ?? 5;
+  const scanDelayMs = options.scanDelayMs ?? 100;
+  const deadline = Date.now() + deadlineMs;
+  const permissionFailures = new Map<string, number>();
+  const abandoned = new Set<string>();
+  let gaveUpOnTarget = false;
+  let quietScans = 0;
+  let consecutiveFailures = 0;
+  let expired = false;
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<number>(resolve => {
+    timer = setTimeout(() => { expired = true; resolve(1); }, deadlineMs);
+  });
+  const cleanup = (async (): Promise<number> => {
+    while (quietScans < 4 && !expired) {
+      if (Date.now() >= deadline) return 1;
+      let processes: RawOsProcess[];
+      try {
+        processes = await ops.scan();
+        consecutiveFailures = 0;
+      } catch {
+        quietScans = 0;
+        consecutiveFailures++;
+        if (consecutiveFailures >= 40) return 1;
+        await delay(250);
+        continue;
+      }
+      if (expired) return 1;
+      const targets = processes.filter(p => p.pid !== process.pid && (p.pgid === pgid || p.envTags?.AGTOP_JOB_ID === jobId) && !abandoned.has(`${p.pid}:${p.startTime}`));
+      if (!targets.length) quietScans++;
+      else {
+        quietScans = 0;
+        await Promise.all(targets.map(async p => {
+          const key = `${p.pid}:${p.startTime}`;
+          try {
+            await ops.signal(p.pid, p.startTime, 9);
+            permissionFailures.delete(key);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EPERM") return;
+            const failures = (permissionFailures.get(key) ?? 0) + 1;
+            permissionFailures.set(key, failures);
+            if (failures >= maxPermissionFailures) {
+              abandoned.add(key);
+              gaveUpOnTarget = true;
+            }
+          }
+        }));
+      }
+      if (quietScans < 4) await delay(scanDelayMs);
+    }
+    return gaveUpOnTarget ? 1 : 0;
+  })();
+  try { return await Promise.race([cleanup, timeout]); }
+  finally { clearTimeout(timer!); }
+}
+
+export async function runWatchdog(args: string[], ops?: PosixOps, options: WatchdogCleanupOptions & { io?: WatchdogIo } = {}): Promise<number> {
   const pgid = Number(args[0]);
   const jobId = args[1];
   if (!Number.isSafeInteger(pgid) || pgid <= 0 || !jobId) return 2;
   try { validateJobId(jobId); } catch { return 2; }
-  try { fs.fstatSync(3); } catch { return 2; }
+  const io = options.io ?? watchdogIo;
+  if (!io.isControlPipe()) return 2;
   ops ??= posixOps();
   try { ops.assertWritable(); } catch { return 1; }
 
@@ -112,37 +205,16 @@ export async function runWatchdog(args: string[], ops?: PosixOps): Promise<numbe
   const ignore = () => {};
   process.on("SIGHUP", ignore);
   process.on("SIGINT", ignore);
+  try {
+    // Do not release the launch gate until the helper proves it can identify the job root.
+    try { if (!await ops.identity(pgid)) return 1; } catch { return 1; }
+    try { io.sendReady(); } catch { return 1; }
 
-  try { fs.writeSync(1, "ready\n"); } catch { return 1; }
-
-  // fd 3 is held open by the manager. EOF means the manager exited, including
-  // an uncatchable crash, so this watchdog owns final fallback cleanup.
-  const byte = Buffer.alloc(1);
-  try { while (fs.readSync(3, byte, 0, 1, null) > 0) {} } catch { /* Treat a broken pipe as manager death. */ }
-
-  let quietScans = 0;
-  let consecutiveFailures = 0;
-  while (quietScans < 4) {
-    let processes: RawOsProcess[];
-    try {
-      processes = await ops.scan();
-      consecutiveFailures = 0;
-    } catch {
-      quietScans = 0;
-      consecutiveFailures++;
-      if (consecutiveFailures >= 40) return 1;
-      await delay(250);
-      continue;
-    }
-    const targets = processes.filter(p => p.pid !== process.pid && (p.pgid === pgid || p.envTags?.AGTOP_JOB_ID === jobId));
-    if (!targets.length) quietScans++;
-    else {
-      quietScans = 0;
-      await Promise.all(targets.map(async p => {
-        try { await ops.signal(p.pid, p.startTime, 9); } catch { /* Exit or permission race; retry on next scan. */ }
-      }));
-    }
-    if (quietScans < 4) await delay(100);
+    // EOF on fd 3 means the manager exited, including an uncatchable crash.
+    try { io.waitForManager(); } catch { /* A broken pipe means the manager exited. */ }
+    return await cleanupWatchdog(pgid, jobId, ops, options);
+  } finally {
+    process.off("SIGHUP", ignore);
+    process.off("SIGINT", ignore);
   }
-  return 0;
 }

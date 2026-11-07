@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isStaleJob, pruneStaleJobs, reserveJob, writeJob } from "../src/registry.js";
+import { isStaleJob, processSnapshot, pruneStaleJobs, reserveJob, writeJob } from "../src/registry.js";
 import type { JobRecord } from "../src/types.js";
 
 const oldState = process.env.AGTOP_STATE_DIR;
@@ -48,5 +48,21 @@ describe("stale job records", () => {
     expect(fs.existsSync(path.join(state, "reclaim-me.json"))).toBe(true);
     release();
     expect(fs.existsSync(path.join(state, "reclaim-me.json"))).toBe(false);
+  });
+
+  test("macOS ps scanner mode keeps records because it cannot provide stale-check tags", () => {
+    const previous = process.env.AGTOP_DARWIN_SCANNER;
+    process.env.AGTOP_DARWIN_SCANNER = "ps";
+    const job = { ...record("ps-mode-live"), mode: "darwin-env-pgid" as const };
+    try {
+      writeJob(job);
+      expect(() => processSnapshot("darwin")).toThrow("native macOS process snapshot");
+      expect(isStaleJob(job, undefined, undefined, "darwin")).toBe(false);
+      expect(pruneStaleJobs(false, candidate => isStaleJob(candidate, undefined, undefined, "darwin"))).toEqual([]);
+      expect(fs.existsSync(path.join(state, "ps-mode-live.json"))).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.AGTOP_DARWIN_SCANNER;
+      else process.env.AGTOP_DARWIN_SCANNER = previous;
+    }
   });
 });

@@ -97,6 +97,22 @@ function executable(command: string, cwd: string, env: Record<string, string>): 
   }
   throw new Error(`Executable not found: ${command}. On Windows, pass script shims through their interpreter.`);
 }
+
+/** In NODE_ENV=test, these hooks override helper argv and timeout for failed-launch coverage. */
+function startWatchdog(pgid: number, jobId: string) {
+  const testOverride = process.env.NODE_ENV === "test" ? process.env.AGTOP_TEST_WATCHDOG_COMMAND : undefined;
+  if (testOverride === undefined) return launchWatchdog(watchdogCommand(pgid, jobId));
+  let command: unknown;
+  try { command = JSON.parse(testOverride); } catch { throw new Error("AGTOP_TEST_WATCHDOG_COMMAND must be a JSON string array."); }
+  if (!Array.isArray(command) || command.length === 0 || command.some(part => typeof part !== "string") || !command[0]) {
+    throw new Error("AGTOP_TEST_WATCHDOG_COMMAND must be a JSON string array with a command.");
+  }
+  const timeoutText = process.env.AGTOP_TEST_WATCHDOG_TIMEOUT_MS;
+  const timeoutMs = timeoutText === undefined ? 10_000 : Number(timeoutText);
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error("AGTOP_TEST_WATCHDOG_TIMEOUT_MS must be a non-negative number.");
+  return launchWatchdog({ command: command[0], args: command.slice(1), env: process.env }, timeoutMs);
+}
+
 export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<ManagedAgent> {
   supported();
   if (process.platform !== "linux" && opts?.cgroupRoot) throw new Error("cgroupRoot is supported only on Linux.");
@@ -179,9 +195,10 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
     if (record.cgroupPath) fs.writeFileSync(path.join(record.cgroupPath, "cgroup.procs"), String(record.rootPid));
     writeJob(record);
     if (!record.cgroupPath) {
-      const started = await launchWatchdog(watchdogCommand(record.rootPid, id));
+      const started = await startWatchdog(record.rootPid, id);
       watchdog = started.child;
       watchdogPipe = started.pipe;
+      watchdogPipe.on("error", () => {});
     }
     (launched.stdio[3] as Writable).end("go\n");
     const exited = rawExit.finally(async () => {
@@ -195,9 +212,20 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
         }
       } finally { watchdogPipe?.end(); release(); if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {} }
     });
-    return { jobId: id, pid: record.rootPid, containmentMode: record.mode, exited, terminate: () => killAgentTree(id) };
+    return {
+      jobId: id, pid: record.rootPid, containmentMode: record.mode, exited,
+      terminate: async () => {
+        const result = await killAgentTree(id);
+        if (!result.failedPids.includes(record.rootPid)) {
+          await Promise.race([exited.then(() => {}, () => {}), delay(5_000, undefined, { ref: false })]);
+        }
+        return result;
+      },
+    };
   } catch (e) {
-    child?.kill("SIGKILL"); watchdogPipe?.end(); watchdog?.kill("SIGKILL"); release();
+    child?.kill("SIGKILL");
+    (child?.stdio[3] as Writable | null | undefined)?.destroy();
+    watchdogPipe?.end(); watchdog?.kill("SIGKILL"); release();
     if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {}
     throw e;
   }
