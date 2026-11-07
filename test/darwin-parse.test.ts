@@ -34,11 +34,10 @@ function shortInfo(input: { pid: number; ppid: number; pgid?: number; status?: n
   return buf;
 }
 
-function procArgs(path: string, argv: string[], env: string[]): Buffer {
+function procArgs(path: string, argv: string[], env: string[], paddingBytes = 4): Buffer {
   const argc = Buffer.alloc(4); argc.writeInt32LE(argv.length);
   const execPath = Buffer.from(`${path}\0`, "utf8");
-  const prefixLength = argc.length + execPath.length;
-  const padding = Buffer.alloc((8 - (prefixLength % 8)) % 8);
+  const padding = Buffer.alloc(paddingBytes);
   return Buffer.concat([argc, execPath, padding, ...argv.map(arg => Buffer.from(`${arg}\0`, "utf8")),
     ...env.map(value => Buffer.from(`${value}\0`, "utf8")), Buffer.from("\0")]);
 }
@@ -118,15 +117,18 @@ describe("Darwin fixed-layout parsing", () => {
     expect(parseVnodeCwd(Buffer.alloc(100))).toBeUndefined();
   });
 
-  test("parses KERN_PROCARGS2 alignment padding, empty and Unicode argv, and environment", () => {
-    const parsed = parseProcArgs2(procArgs("/Applications/Aгtop.app/Contents/MacOS/agtop", ["agtop", "--empty", "", "雪"], ["AGTOP_JOB_ID=live-x", "PATH=/bin"]), 2048);
-    expect(parsed).toEqual({ execPath: "/Applications/Aгtop.app/Contents/MacOS/agtop", argv: ["agtop", "--empty", "", "雪"], env: ["AGTOP_JOB_ID=live-x", "PATH=/bin"] });
-    expect(parseEnvironment(parsed!.env.join("\0"))).toEqual({ AGTOP_JOB_ID: "live-x" });
+  test("skips variable KERN_PROCARGS2 padding before argv and reads empty and Unicode arguments by count", () => {
+    for (const paddingBytes of [1, 4, 7, 13]) {
+      const parsed = parseProcArgs2(procArgs("/Applications/agtop.app/Contents/MacOS/agtop", ["agtop", "--empty", "", "\u96EA"], ["AGTOP_JOB_ID=live-x", "PATH=/bin"], paddingBytes), 2048);
+      expect(parsed).toEqual({ execPath: "/Applications/agtop.app/Contents/MacOS/agtop", argv: ["agtop", "--empty", "", "\u96EA"], env: ["AGTOP_JOB_ID=live-x", "PATH=/bin"] });
+      expect(parseEnvironment(parsed!.env.join("\0"))).toEqual({ AGTOP_JOB_ID: "live-x" });
+    }
   });
 
-  test("preserves an empty argv[0] and accepts argc zero", () => {
-    expect(parseProcArgs2(procArgs("/bin/tool", [""], ["AGTOP_JOB_ID=empty-zero"]), 2048)).toEqual({
-      execPath: "/bin/tool", argv: [""], env: ["AGTOP_JOB_ID=empty-zero"],
+  test("documents the empty argv[0] ambiguity and accepts argc zero", () => {
+    // An empty argv[0] is indistinguishable from the NUL padding after exec_path.
+    expect(parseProcArgs2(procArgs("/bin/tool", [""], ["AGTOP_JOB_ID=empty-zero"], 1), 2048)).toEqual({
+      execPath: "/bin/tool", argv: ["AGTOP_JOB_ID=empty-zero"], env: [],
     });
     expect(parseProcArgs2(procArgs("/bin/tool", [], ["AGTOP_JOB_ID=no-args"]), 2048)).toEqual({
       execPath: "/bin/tool", argv: [], env: ["AGTOP_JOB_ID=no-args"],

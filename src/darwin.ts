@@ -262,9 +262,10 @@ export function parseProcArgs2(buf: Buffer, length: number): { execPath: string;
   if (pathEnd < cursor || pathEnd >= end) return;
   const execPath = buf.toString("utf8", cursor, pathEnd);
   if (!execPath) return;
-  // KERN_PROCARGS2 pads the exec path to the next pointer boundary. Skip only
-  // that padding so an empty argv[0] remains distinguishable from padding.
-  cursor = Math.min(end, (pathEnd + 1 + 7) & ~7);
+  // KERN_PROCARGS2 can include a variable run of NUL padding after exec_path.
+  // An empty argv[0] is indistinguishable from this padding, so it is skipped.
+  cursor = pathEnd + 1;
+  while (cursor < end && buf[cursor] === 0) cursor++;
   const argv: string[] = [];
   for (let i = 0; i < argc; i++) {
     if (cursor >= end) break;
