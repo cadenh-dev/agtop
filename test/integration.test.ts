@@ -54,6 +54,30 @@ test("cross-process ps and kill find descendants after their intermediate parent
     await agent.exited;
   } finally { await agent.terminate().catch(() => {}); await agent.exited; }
 }, 45000);
+test("managed process socket evidence identifies its local inference server", async () => {
+  const ready = path.join(temporary, "socket-server.json");
+  const serverScript = path.join(temporary, "ollama.js");
+  fs.writeFileSync(serverScript, `const http=require('http');const fs=require('fs');const server=http.createServer((req,res)=>{res.writeHead(200);res.write('connected');});server.listen(0,'127.0.0.1',()=>fs.writeFileSync(process.argv[2],JSON.stringify({port:server.address().port,pid:process.pid})));setInterval(()=>{},1000);`);
+  const server = spawn(process.execPath, ["run", serverScript, ready], { stdio: "ignore", windowsHide: true });
+  const clientScript = `require('http').get('http://127.0.0.1:'+process.argv[1],res=>{});setInterval(()=>{},1000);`;
+  let agent: Awaited<ReturnType<typeof spawnContainedAgent>> | undefined;
+  try {
+    await waitFile(ready);
+    const endpoint = JSON.parse(fs.readFileSync(ready, "utf8")) as { port: number; pid: number };
+    agent = await spawnContainedAgent({ jobId: "socket-attribution", harness: "custom", command: process.execPath, args: ["-e", clientScript, String(endpoint.port)] });
+    let tree: Awaited<ReturnType<typeof listAgentTrees>>[number] | undefined;
+    for (let i = 0; i < 3; i++) {
+      tree = (await listAgentTrees()).find(t => t.jobId === agent!.jobId);
+      if (tree?.backendEvidence.includes(`ollama, pid ${endpoint.pid}`)) break;
+      await delay(100);
+    }
+    expect(tree?.backend).toBe("local-engine");
+    expect(tree?.backendEvidence).toContain(`socket: pid ${agent.pid} -> 127.0.0.1:${endpoint.port} (ollama, pid ${endpoint.pid})`);
+  } finally {
+    if (agent) { await agent.terminate().catch(() => {}); await agent.exited; }
+    server.kill();
+  }
+}, 30000);
 test("failed spawn and duplicate job IDs do not leak or overwrite ownership", async () => {
   await expect(spawnContainedAgent({ jobId: "missing", harness: "custom", command: "agtop-this-command-does-not-exist" })).rejects.toThrow("Executable not found");
   await expect(spawnContainedAgent({ jobId: "../escape", harness: "custom", command: process.execPath })).rejects.toThrow("Job ID");

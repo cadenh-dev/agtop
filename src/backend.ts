@@ -2,8 +2,19 @@ import type { Backend, RawOsProcess } from "./types.js";
 
 export function backendFor(processes: RawOsProcess[], localEngine = false): { backend: Backend; evidence: string } {
   for (const p of processes) {
+    if (p.envTags?.AGTOP_BACKEND === "amd-lemonade-local") return { backend: "amd-lemonade-local", evidence: "Explicit launch configuration" };
+  }
+  let unknownSocket: string | undefined;
+  for (const p of processes) {
+    for (const connection of p.socketConnections || []) {
+      const endpoint = `${connection.address}:${connection.port}`;
+      if (connection.port === 13305) return { backend: "amd-lemonade-local", evidence: `socket: pid ${p.pid} -> ${endpoint} (Lemonade port 13305)` };
+      if (connection.serverHarness && connection.serverPid) return { backend: "local-engine", evidence: `socket: pid ${p.pid} -> ${endpoint} (${connection.serverHarness}, pid ${connection.serverPid})` };
+      unknownSocket ??= `socket: pid ${p.pid} -> ${endpoint} (unrecognised listener)`;
+    }
+  }
+  for (const p of processes) {
     const env = p.envTags || {};
-    if (env.AGTOP_BACKEND === "amd-lemonade-local") return { backend: "amd-lemonade-local", evidence: "Explicit launch configuration" };
     for (const key of ["OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"]) {
       try {
         const url = new URL(env[key]);
@@ -12,8 +23,9 @@ export function backendFor(processes: RawOsProcess[], localEngine = false): { ba
       } catch {}
     }
   }
+  if (unknownSocket) return { backend: "unknown", evidence: unknownSocket };
   if (localEngine) return { backend: "local-engine", evidence: "Local inference server executable" };
-  return { backend: "unknown", evidence: "No observable endpoint configuration" };
+  return { backend: "unknown", evidence: "No observable endpoint configuration or local socket" };
 }
 export function lemonadeBase(raw = "http://127.0.0.1:13305"): string {
   const u = new URL(raw);

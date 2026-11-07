@@ -128,7 +128,7 @@ Git attribution walks upward from cwd and reads `.git`, `HEAD`, and `commondir`,
 
 `run --lemonade` sets `OPENAI_BASE_URL`, `OPENAI_API_BASE`, and `ANTHROPIC_BASE_URL` without replacing your API credentials. Use `--lemonade-url URL` for another base URL. Check your harness's endpoint configuration requirements. Current endpoints are described in the [Lemonade API documentation](https://lemonade-server.ai/docs/api/lemonade/).
 
-Backend labels include their evidence. A configured local port 13305 or an explicit Lemonade launch option indicates intended routing, not measured GPU/NPU activity. Without observable evidence the backend remains `unknown`; server availability alone does not classify every agent as local. Socket attribution and GPU/NPU utilization measurement are not implemented.
+Backend labels include their evidence. agtop attributes established loopback TCP connections from an agent tree to the listening process when it recognizes a local inference server. Evidence includes the client PID, endpoint, server harness, and server PID (for example, `socket: pid 1234 -> 127.0.0.1:11434 (ollama, pid 999)`). Connections to the known Lemonade port 13305 are labeled Lemonade even when its process is not recognized. A local port without a recognized server remains `unknown` and names the observed endpoint; remote peers are never labeled local. Explicit Lemonade launch settings still indicate intended routing. Socket evidence shows a connection, not model execution or GPU/NPU activity, which agtop does not measure.
 
 ## Daemon
 

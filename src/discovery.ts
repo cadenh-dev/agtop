@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { RawOsProcess } from "./types.js";
+import { collectSocketConnections } from "./sockets.js";
 export { detectHarness, harnesses, harnessCatalog, harnessKind, harnessLabel, isLocalHarness } from "./harnesses.js";
 export type { HarnessDefinition, HarnessKind, HarnessRule } from "./harnesses.js";
 
@@ -54,17 +55,20 @@ export async function scanLinuxProcesses(): Promise<RawOsProcess[]> {
       } catch { /* Permission denied or a process exited. */ }
     }
   }));
+  await collectSocketConnections(results);
   return results;
 }
 export async function scanWindowsProcesses(): Promise<RawOsProcess[]> {
   const script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,WorkingSetSize,KernelModeTime,UserModeTime,@{n='Start';e={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds().ToString()}}) | ConvertTo-Json -Compress";
   const { stdout } = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 20000, maxBuffer: 32 * 1024 * 1024 });
   const parsed = JSON.parse(stdout.replace(/^\uFEFF/, "")) || [];
-  return (Array.isArray(parsed) ? parsed : [parsed]).filter(p => p.ProcessId > 0).map(p => ({
+  const results = (Array.isArray(parsed) ? parsed : [parsed]).filter(p => p.ProcessId > 0).map(p => ({
     pid: Number(p.ProcessId), ppid: Number(p.ParentProcessId), name: p.Name || "", cmdline: p.CommandLine || p.Name || "",
     startTime: /^\d+$/.test(String(p.Start)) ? String(p.Start) : "0", cpuSeconds: (Number(p.KernelModeTime || 0) + Number(p.UserModeTime || 0)) / 1e7,
     memoryMb: Number(p.WorkingSetSize || 0) / 1048576, cpuPercent: 0,
   }));
+  await collectSocketConnections(results);
+  return results;
 }
 export class CpuSampler {
   private previous = new Map<number, { start: string; seconds: number; at: number }>();
