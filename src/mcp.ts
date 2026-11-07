@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { probeLemonade } from "./backend.js";
+import { pruneStaleJobs } from "./registry.js";
 import { harnessCatalog, harnesses, harnessLabel } from "./harnesses.js";
 import { killAgentTree, listAgentTrees, spawnContainedAgent } from "./manager.js";
 import type { AgentProcessTree, HarnessType, ManagedAgent } from "./types.js";
@@ -254,7 +255,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
 
   server.registerTool("cleanup", {
     title: "Stop all task jobs",
-    description: "Terminate every job created by this MCP session. Use before finishing a task.",
+    description: "Terminate every job created by this MCP session and remove records proven stale. Other live jobs remain untouched.",
     inputSchema: {},
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   }, async () => {
@@ -270,7 +271,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
         results.push({ jobId, error: e instanceof Error ? e.message : String(e) });
       }
     }
-    return text({ jobs: results });
+    return text({ jobs: results, staleRecordsRemoved: pruneStaleJobs() });
   });
 
   server.registerTool("harnesses", {

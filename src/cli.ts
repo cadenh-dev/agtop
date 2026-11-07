@@ -8,6 +8,7 @@ import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
 import { harnessCatalog } from "./harnesses.js";
 import { startMcpServer } from "./mcp.js";
+import { pruneStaleJobs } from "./registry.js";
 import type { AgentProcessTree, HarnessType, SpawnAgentOptions } from "./types.js";
 
 const help = `agtop — agent-aware process manager
@@ -17,7 +18,7 @@ const help = `agtop — agent-aware process manager
   agtop ps [--json]            Discover agents and sample CPU usage
   agtop run [options] -- COMMAND [ARGS...]
   agtop kill JOB_ID_OR_PID     Force-stop an agent tree
-  agtop cleanup                Stop every managed agent job
+  agtop cleanup [--stale] [--dry-run] [--json]  Stop jobs or prune stale records
   agtop harnesses [QUERY] [--json]  List or search supported harnesses
   agtop mcp [--peer NAME]      MCP stdio server for agent-facing task containment
   agtop lemonade [--json]      Probe local server and loaded models
@@ -98,7 +99,14 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (result.failedPids.length || result.errors.length) process.exitCode = 1; return;
   }
   if (command === "cleanup") {
-    if (rest.length) throw new Error("Usage: agtop cleanup");
+    if (rest.some(a => !["--stale", "--dry-run", "--json"].includes(a)) || new Set(rest).size !== rest.length) throw new Error("Usage: agtop cleanup [--stale] [--dry-run] [--json]");
+    if (rest.includes("--stale")) {
+      const jobs = pruneStaleJobs(rest.includes("--dry-run"));
+      if (rest.includes("--json")) console.log(JSON.stringify({ stale: jobs, dryRun: rest.includes("--dry-run"), deleted: rest.includes("--dry-run") ? [] : jobs }, null, 2));
+      else console.log(rest.includes("--dry-run") ? `Would remove ${jobs.length} stale job record(s): ${jobs.join(", ") || "none"}` : `Removed ${jobs.length} stale job record(s): ${jobs.join(", ") || "none"}`);
+      return;
+    }
+    if (rest.includes("--dry-run") || rest.includes("--json")) throw new Error("--dry-run and --json require --stale.");
     const trees = (await listAgentTrees()).filter(t => t.containmentMode !== "passive-ppid");
     const results = [];
     for (const tree of trees) {

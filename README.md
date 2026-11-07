@@ -43,6 +43,7 @@ bun agtop.ts ps --json
 bun agtop.ts harnesses claude
 bun agtop.ts mcp
 bun agtop.ts cleanup
+bun agtop.ts cleanup --stale --dry-run --json
 bun agtop.ts top
 bun agtop.ts run --harness codex -- codex
 bun agtop.ts kill JOB_ID
@@ -116,7 +117,7 @@ The library accepts `cgroupRoot`; `AGTOP_CGROUP_ROOT` supplies a default. This d
 
 These mechanisms manage process lifetimes; they are not a security sandbox. No filesystem, network, memory, CPU, or privilege restrictions are configured. A process with sufficient permissions can evade Linux containment. Tags can be changed or cleared, and a process group can be escaped with `setsid`. Linux fallback termination checks process creation times but still has a check-to-signal race; it does not use pidfds. A hard crash of the Linux manager does not automatically kill its children. Windows uses non-inherited Job Object handles and kill-on-close.
 
-Job records live under the current user's local state directory (`LOCALAPPDATA/agtop` on Windows; `XDG_STATE_HOME/agtop` or `~/.local/state/agtop` on Linux). `AGTOP_STATE_DIR` overrides it. This lets separate `ps` and `kill` commands find a live supervisor's jobs. Job IDs are unique reservations. A crashed manager can leave an inactive record; choose a new ID or remove the stale record after verifying that its job no longer exists.
+Job records live under the current user's local state directory (`LOCALAPPDATA/agtop` on Windows; `XDG_STATE_HOME/agtop` or `~/.local/state/agtop` on Linux). `AGTOP_STATE_DIR` overrides it. This lets separate `ps` and `kill` commands find a live supervisor's jobs. Job IDs are unique reservations. Records whose supervisor PID and creation time are gone and whose containment unit has no live members are stale; `ps` omits them. `agtop cleanup --stale` removes proven stale records, `--dry-run` previews removal, and `--json` prints machine-readable results. Reusing a stale ID removes its old record during reservation. If the OS cannot verify process or containment state, agtop keeps the record.
 
 Linux reads command lines, creation times, CPU time, RSS, cwd, and selected environment tags from `/proc`. Windows uses an asynchronous CIM snapshot for command lines, CPU time, RSS, and creation times; it uses Koffi for Job Object operations. It does not read another process's PEB. Permission-denied process details may be unavailable. Scanner failures are reported rather than returned as an empty list.
 
@@ -163,7 +164,7 @@ Daemon-created processes use ignored stdio. Graceful shutdown terminates jobs cr
 | `harnesses` | Search the supported harness catalog |
 | `lemonade` | Probe the local Lemonade server |
 
-The job ID is the task ID: pass your orchestrator or thread task ID as `jobId`, and a peer label as `peer`. OpenCode passes its session ID in MCP metadata; the server appends it to `AGTOP_PEER` automatically. `cleanup` and server shutdown terminate owned jobs, so a finished task does not leave watchers or dev servers behind. Output is discarded; use the agent's normal shell for commands whose stdout the agent needs.
+The job ID is the task ID: pass your orchestrator or thread task ID as `jobId`, and a peer label as `peer`. OpenCode passes its session ID in MCP metadata; the server appends it to `AGTOP_PEER` automatically. `cleanup` and server shutdown terminate owned jobs, so a finished task does not leave watchers or dev servers behind. MCP `cleanup` also removes records proven stale; it never removes another session's live records. Output is discarded; use the agent's normal shell for commands whose stdout the agent needs.
 
 Register it globally. OpenCode V2 (`~/.config/opencode/opencode.json`):
 

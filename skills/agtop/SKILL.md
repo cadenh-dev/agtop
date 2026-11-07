@@ -26,7 +26,7 @@ The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `
 ## Rules
 
 - Always pass a task-specific `jobId`; treat it as the task ID. Use `peer` to label the task or tenant.
-- `kill` only accepts jobs created by this MCP session. Do not try to kill other agents' jobs; use your own orchestrator for that.
+- `kill` only accepts jobs created by this MCP session. Do not try to kill other agents' live jobs; use your own orchestrator for that. MCP `cleanup` may remove records only when agtop proves the supervisor and all contained members are gone.
 - Call `agtop_cleanup` before finishing any task that started helpers, even if you expect them to have exited.
 - If `wait` times out, the job is still running. Inspect it and decide whether to kill it; do not assume it finished.
 - Use the normal shell for commands whose output you must read. `agtop_run` uses ignored stdio.
