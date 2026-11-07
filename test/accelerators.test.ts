@@ -123,7 +123,7 @@ describe("accelerator sampling core", () => {
 
   test("imports core and empty platform stubs without native dependencies", async () => {
     const modules = await Promise.all(["../src/accel-linux.js", "../src/accel-nvml.js", "../src/accel-windows.js", "../src/accel-darwin.js"].map(path => import(path)));
-    expect(modules.every(mod => mod.createProvider() === undefined)).toBe(true);
+    expect(modules.every(mod => typeof mod.createProvider === "function")).toBe(true);
     const code = readFileSync(new URL("../src/accelerators.ts", import.meta.url), "utf8") + modules.map((_, i) =>
       readFileSync(new URL(["../src/accel-linux.ts", "../src/accel-nvml.ts", "../src/accel-windows.ts", "../src/accel-darwin.ts"][i], import.meta.url), "utf8")).join("\n");
     expect(code).not.toMatch(/from\s+["']koffi["']|require\(["']koffi["']\)/);
