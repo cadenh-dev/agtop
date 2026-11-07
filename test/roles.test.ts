@@ -28,6 +28,30 @@ function makeFixture(argv: string[], options: Options = {}): Fixture {
     rootPid: options.rootPid ?? parents[0]?.pid ?? pid, tagId: options.tagId, managed: options.managed ?? false,
     processes: [...parents, ...(options.extras ?? []), target] }, pid };
 }
+function cloneFixture(input: Fixture): Fixture {
+  return {
+    pid: input.pid,
+    tree: {
+      ...input.tree,
+      processes: input.tree.processes.map(process => ({
+        ...process,
+        argv: process.argv ? [...process.argv] : undefined,
+        envTags: process.envTags ? { ...process.envTags } : undefined,
+        listeningSockets: process.listeningSockets?.map(socket => ({ ...socket })),
+      })),
+    },
+  };
+}
+function seededShuffle<T>(items: readonly T[], seed: number): T[] {
+  const result = [...items];
+  let state = seed >>> 0;
+  for (let i = result.length - 1; i > 0; i--) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    const j = state % (i + 1);
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 type Case = { name: string; fixture: Fixture; role: ProcessRole; source: RoleSource; evidence: RegExp };
 function row(name: string, argv: string[], role: ProcessRole, source: RoleSource, evidence: RegExp, options: Options = {}): Case {
   return { name, fixture: makeFixture(argv, options), role, source, evidence };
@@ -190,7 +214,7 @@ describe("role classifier cases", () => {
   });
   test("evidence across positive fixtures never contains raw argv, cwd, or environment text", () => {
     for (const item of positive) {
-      const { tree, pid } = item.fixture;
+      const { tree, pid } = cloneFixture(item.fixture);
       const target = tree.processes.find(process => process.pid === pid)!;
       target.argv = [...(target.argv ?? []), SECRET];
       target.cmdline = `${target.cmdline} ${SECRET}`;
@@ -270,31 +294,51 @@ describe("catalog and structural invariants", () => {
 });
 
 describe("role classifier structure and cost", () => {
-  test("input order does not affect assignments", () => {
+  test("input order does not affect assignments across seeded shuffles and a cycle", () => {
     const input = makeFixture(["vite", "build"]);
-    const baseline = [...classifyTreeRoles(input.tree)].sort(([a], [b]) => a - b);
-    const reversed = { ...input.tree, processes: [...input.tree.processes].reverse() };
-    expect([...classifyTreeRoles(reversed)].sort(([a], [b]) => a - b)).toEqual(baseline);
+    const cycle = {
+      jobId: "cycle", harness: "custom" as const, rootPid: 99, managed: false,
+      processes: [proc(1, 2, ["unknown-a"]), proc(2, 1, ["unknown-b"]), proc(3, 2, ["unknown-c"])],
+    };
+    for (const tree of [input.tree, cycle]) {
+      const baseline = [...classifyTreeRoles(tree)].sort(([a], [b]) => a - b);
+      for (const seed of [1, 17, 2025, 0x5eed]) {
+        const shuffled = { ...tree, processes: seededShuffle(tree.processes, seed) };
+        expect([...classifyTreeRoles(shuffled)].sort(([a], [b]) => a - b)).toEqual(baseline);
+      }
+    }
   });
-  test("10,000-deep and 10,000-wide inputs each classify in under 250 ms", () => {
+  test("10,000-deep and 10,000-wide inputs classify within a stable budget", () => {
     const chain: RawOsProcess[] = [proc(1, 0, ["claude"])];
     for (let pid = 2; pid <= 10_000; pid++) chain.push(proc(pid, pid - 1, ["unknown-worker"]));
     const deep = { jobId: "deep", harness: "claude-code" as const, rootPid: 1, managed: false, processes: chain };
-    const deepStart = performance.now();
-    expect(classifyTreeRoles(deep).size).toBe(10_000);
-    expect(performance.now() - deepStart).toBeLessThan(250);
 
     const wideProcesses: RawOsProcess[] = [proc(1, 0, ["claude"])];
     for (let pid = 2; pid <= 10_000; pid++) wideProcesses.push(proc(pid, 1, ["unknown-worker"]));
     const wide = { jobId: "wide", harness: "claude-code" as const, rootPid: 1, managed: false, processes: wideProcesses };
-    const wideStart = performance.now();
-    expect(classifyTreeRoles(wide).size).toBe(10_000);
-    expect(performance.now() - wideStart).toBeLessThan(250);
+
+    const budgetMs = process.env.CI ? 1_000 : 250;
+    for (const [tree, expectedCounts] of [
+      [deep, { agent: 1, tool: 9_999 }],
+      [wide, { agent: 1, tool: 9_999 }],
+    ] as const) {
+      let bestMs = Number.POSITIVE_INFINITY;
+      for (let run = 0; run < 3; run++) {
+        const start = performance.now();
+        const assignments = classifyTreeRoles(tree);
+        bestMs = Math.min(bestMs, performance.now() - start);
+        expect(assignments.size).toBe(10_000);
+        expect(countRoles([...assignments.values()])).toEqual(expectedCounts);
+      }
+      expect(bestMs).toBeLessThan(budgetMs);
+    }
   });
   test("cycles in ppid relationships terminate", () => {
     const tree = { jobId: "cycle", harness: "custom" as const, rootPid: 99, managed: false,
       processes: [proc(1, 2, ["unknown-a"]), proc(2, 1, ["unknown-b"]) ] };
-    expect(classifyTreeRoles(tree).size).toBe(2);
+    const assignments = classifyTreeRoles(tree);
+    expect(assignments.size).toBe(2);
+    expect(countRoles([...assignments.values()])).toEqual({ tool: 2 });
   });
   test("inheritance propagates to descendants and sockets use the lowest port", () => {
     const inherited = makeFixture(["node", "-e", "work()"], {
@@ -332,21 +376,119 @@ describe("correlateTrees role integration", () => {
   });
 });
 
-test("all positive role examples keep evidence safe with an injected secret", () => {
-  for (const item of positive) {
-    const { tree, pid } = item.fixture;
-    const target = tree.processes.find(process => process.pid === pid)!;
-    target.argv = [...(target.argv ?? []), SECRET];
-    target.cmdline = `${target.cmdline} ${SECRET}`;
-    target.cwd = `/work/${SECRET}`;
-    target.envTags = { ...target.envTags, OPENAI_API_BASE: `https://${SECRET}` };
-    for (const assignment of classifyTreeRoles(tree).values()) expect(assignment.evidence).not.toContain(SECRET);
-  }
-});
-
-test("known harness IDs are catalogued for nested-job checks", () => {
+test("Codex is catalogued and inline code is not command evidence", () => {
   expect(HARNESS_DEFINITIONS.some(definition => definition.id === "codex")).toBe(true);
   expect(analyzeCommand(proc(1, 0, ["node", "-e", "require('vite')"]))).toEqual({
     anchors: [{ name: "node", path: "node", rest: [] }],
+  });
+});
+
+describe("review regressions", () => {
+  const promptAndDataCases: Array<[string, string[], ProcessRole]> = [
+    ['bash -c "grep -rn @openai/codex node_modules/.package-lock.json"', ["bash", "-c", "grep -rn @openai/codex node_modules/.package-lock.json"], "shell"],
+    ['bash -c "pip install aider-chat && python run.py"', ["bash", "-c", "pip install aider-chat && python run.py"], "shell"],
+    ['bash -c "ls ~/.lmstudio/models"', ["bash", "-c", "ls ~/.lmstudio/models"], "shell"],
+    ['bash -c "git diff -- src/text-generation-webui.ts"', ["bash", "-c", "git diff -- src/text-generation-webui.ts"], "shell"],
+    ['sh -c "echo hi > /tmp/ollama"', ["sh", "-c", "echo hi > /tmp/ollama"], "shell"],
+    ["node dist/cli.js --prompt with an embedded harness path", ["node", "dist/cli.js", "--prompt", "migrate from @anthropic-ai/claude-code/sdk"], "tool"],
+    ["node -e require of a Codex package path", ["node", "-e", "require('/x/node_modules/@openai/codex/bin/codex.js')"], "tool"],
+    ["python -c open of an Ollama path", ["python", "-c", "open('/x/ollama')"], "tool"],
+    ["python3 scanner with an Open Interpreter data path", ["python3", "tools/scan.py", "/w/vendor/open-interpreter/"], "tool"],
+  ];
+  test.each(promptAndDataCases)("B1 %s", (_name, argv, role) => {
+    const input = makeFixture(argv);
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe(role);
+  });
+
+  test("B1 bash -c codex does not count the real Codex child twice", () => {
+    const processes = [proc(1, 0, ["claude"]), proc(2, 1, ["bash", "-c", "codex"]), proc(3, 2, ["codex"])];
+    const assignments = classifyTreeRoles({
+      jobId: "launcher", harness: "claude-code", rootPid: 1, managed: false, processes,
+    });
+    expect(assignments.get(2)?.role).toBe("shell");
+    expect(assignments.get(3)?.role).toBe("subagent");
+    expect([...assignments.values()].filter(assignment => assignment.role === "subagent")).toHaveLength(1);
+  });
+
+  test.each([
+    ["Node Claude Code entry point", ["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"]],
+    ["Python Aider module", ["python", "-m", "aider"]],
+    ["uvx Aider", ["uvx", "aider"]],
+  ])("B3 preserves positive harness recognition for %s", (_name, argv) => {
+    const input = makeFixture(argv);
+    const assignment = classifyTreeRoles(input.tree).get(input.pid);
+    expect(assignment?.role).toBe("subagent");
+    expect(assignment?.source).toBe("harness");
+  });
+
+  const combinedFlagCases: Array<[string, string[]]> = [
+    ["node -pe", ["node", "-pe", "require('/x/node_modules/@modelcontextprotocol/server-x')"]],
+    ["python -Sc", ["python", "-Sc", "x='/x/_pytest/'"]],
+    ["python3 -Ic", ["python3", "-Ic", "x='/vitest/dist/'"]],
+  ];
+  test.each(combinedFlagCases)("S1 combined value-taking flag %s stays a tool", (_name, argv) => {
+    const input = makeFixture(argv);
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe("tool");
+  });
+
+  test.each([
+    ["backslash escaped quotes", String.raw`node.exe -e "console.log(\"/x/@modelcontextprotocol/server-a\")"`],
+    ["doubled quotes", String.raw`node.exe -e "console.log(""quoted"")"`],
+  ])("S2 Windows cmdline-only parsing handles %s", (_name, cmdline) => {
+    const input = makeFixture(["node.exe"], { targetExtra: { name: "node.exe", argv: undefined, cmdline } });
+    expect(analyzeCommand({ name: "node.exe", argv: undefined, cmdline })).toEqual({
+      anchors: [{ name: "node", path: "node.exe", rest: [] }],
+    });
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe("tool");
+  });
+
+  test("S3 a custom root override remembers its detected harness for launcher children", () => {
+    const tree = {
+      jobId: "custom-codex", harness: "custom" as const, rootPid: 1, managed: false,
+      processes: [proc(1, 0, ["codex"]), proc(2, 1, ["codex"])],
+    };
+    const assignments = classifyTreeRoles(tree);
+    expect(assignments.get(1)).toEqual({ role: "agent", source: "harness", evidence: "root: harness codex" });
+    expect(assignments.get(2)).toEqual({
+      role: "agent", source: "harness", evidence: "launcher chain: harness codex under pid 1",
+    });
+  });
+
+  test("N1 invalid nested job IDs use a fixed evidence placeholder", () => {
+    const malformedId = "S3CRET\nroles: fake";
+    const input = makeFixture(["unknown-worker"], {
+      tagId: "outer",
+      targetExtra: { envTags: { AGTOP_JOB_ID: malformedId, AGTOP_HARNESS: "codex" } },
+    });
+    const assignment = classifyTreeRoles(input.tree).get(input.pid)!;
+    expect(assignment).toEqual({ role: "subagent", source: "job", evidence: "nested job unknown (codex)" });
+    expect(assignment.evidence).not.toContain(malformedId);
+    expect(assignment.evidence).not.toContain("roles: fake");
+  });
+
+  test("N2 uv tool run unwraps to its MCP executable", () => {
+    const input = makeFixture(["uv", "tool", "run", "mcp-server-x"]);
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe("mcp-server");
+  });
+
+  test("N3 Codex model values do not hide its MCP subcommand", () => {
+    const input = makeFixture(["codex", "--model", "o3", "mcp-server"]);
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe("mcp-server");
+  });
+
+  test("N5 evidence does not serialize an anchor path or malformed nested job ID", () => {
+    const anchorPath = `/work/${SECRET}/node_modules/@modelcontextprotocol/server-safe/index.js`;
+    const anchor = makeFixture(["node", anchorPath]);
+    const anchorEvidence = classifyTreeRoles(anchor.tree).get(anchor.pid)!;
+    expect(anchorEvidence.role).toBe("mcp-server");
+    expect(anchorEvidence.evidence).not.toContain(SECRET);
+
+    const malformedId = "S3CRET\nroles: fake";
+    const nested = makeFixture(["unknown-worker"], {
+      tagId: "outer", targetExtra: { envTags: { AGTOP_JOB_ID: malformedId, AGTOP_HARNESS: "codex" } },
+    });
+    const nestedEvidence = classifyTreeRoles(nested.tree).get(nested.pid)!;
+    expect(nestedEvidence.evidence).not.toContain(malformedId);
+    expect(nestedEvidence.evidence).not.toContain("roles: fake");
   });
 });

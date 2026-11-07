@@ -1,4 +1,4 @@
-import { base, detectHarness, harnessKind, harnesses, normalize, tokens } from "./harnesses.js";
+import { base, detectHarness, harnessKind, harnesses, normalize } from "./harnesses.js";
 import type { HarnessType, ProcessRole, RawOsProcess, RoleSource } from "./types.js";
 
 export interface CommandAnchor {
@@ -13,27 +13,84 @@ export interface CommandFacts {
 }
 
 const SKIP_NEXT = new Set([
-  "-e", "--eval", "-p", "--print", "-c", "--command", "-r", "--require", "--import", "--loader",
+  "-e", "--eval", "-p", "--print", "-c", "--command", "-r", "--require", "--import", "--loader", "-m",
   "--experimental-loader", "-C", "--conditions", "--env-file", "-X", "-W", "--from", "--with", "--python",
-  "--package", "--cwd", "--config",
+  "--package", "--cwd", "--config", "--model", "--profile",
 ]);
 const ROLE_INTERPRETERS = new Set([
   "node", "nodejs", "bun", "bunx", "deno", "npx", "pnpx", "uv", "uvx", "pipx", "py", "env",
 ]);
+const ROLE_SHELLS = new Set([
+  "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh", "cmd",
+  "powershell", "pwsh", "-sh", "-bash", "-zsh", "-fish",
+]);
 const WRAPPER_SUBCOMMANDS = new Set(["run", "tool", "exec", "x", "dlx"]);
 const INLINE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PACKAGE_SPEC = /^(?:(@[^/@\s]+\/[^/@\s]+)|([^/@\s]+))(?:@[^/\s]*|==[^/\s]*)$/;
+const UNSAFE_ROLE_TOKEN = /[\s"'();]/;
+
+function isValueTakingFlag(token: string): boolean {
+  return SKIP_NEXT.has(token) || /^-[A-Za-z]{2,}$/.test(token) && /[epcrCXW]$/.test(token);
+}
+
+function isSafeRoleToken(token: string): boolean {
+  return !UNSAFE_ROLE_TOKEN.test(token);
+}
+
+/** Split a Windows command line using CommandLineToArgvW quote and backslash rules. */
+function windowsArgv(commandLine: string): string[] {
+  const result: string[] = [];
+  let i = 0;
+  while (i < commandLine.length) {
+    while (i < commandLine.length && /\s/.test(commandLine[i])) i++;
+    if (i >= commandLine.length) break;
+
+    let token = "";
+    let quoted = false;
+    while (i < commandLine.length) {
+      if (!quoted && /\s/.test(commandLine[i])) break;
+      let slashes = 0;
+      while (commandLine[i] === "\\") {
+        slashes++;
+        i++;
+      }
+      if (commandLine[i] === '"') {
+        token += "\\".repeat(Math.floor(slashes / 2));
+        if (slashes % 2 === 1) {
+          token += '"';
+          i++;
+        } else if (quoted && commandLine[i + 1] === '"') {
+          token += '"';
+          i += 2;
+        } else {
+          quoted = !quoted;
+          i++;
+        }
+        continue;
+      }
+      token += "\\".repeat(slashes);
+      if (i < commandLine.length && (quoted || !/\s/.test(commandLine[i]))) token += commandLine[i++];
+    }
+    result.push(token);
+    while (i < commandLine.length && /\s/.test(commandLine[i])) i++;
+  }
+  return result;
+}
+
+function commandArgv(p: Pick<RawOsProcess, "cmdline" | "argv">): string[] {
+  return p.argv?.length ? p.argv : windowsArgv(p.cmdline);
+}
 
 function positional(list: readonly string[]): string[] {
   const result: string[] = [];
   for (let i = 0; i < list.length; i++) {
     const token = list[i];
-    if (SKIP_NEXT.has(token)) {
+    if (isValueTakingFlag(token)) {
       i++;
       continue;
     }
     if (token.startsWith("-")) continue;
-    result.push(token.toLowerCase());
+    if (isSafeRoleToken(token)) result.push(token.toLowerCase());
   }
   return result;
 }
@@ -47,9 +104,29 @@ function isRoleInterpreter(name: string): boolean {
   return ROLE_INTERPRETERS.has(name) || /^python\d*(\.\d+)?$/.test(name);
 }
 
+function safeHarnessArgv(p: RawOsProcess, facts: CommandFacts): string[] {
+  const executable = facts.anchors[0];
+  const exe = executable?.path || p.name;
+  if (p.argv?.length === 1) return p.argv;
+  const exeName = executable?.name || base(exe);
+  const processName = base(p.name);
+  if (ROLE_SHELLS.has(exeName) || ROLE_SHELLS.has(processName)) return [exe];
+  if (isRoleInterpreter(exeName) || isRoleInterpreter(processName)) {
+    if (facts.module) return [exe, "-m", facts.module.name];
+    const program = facts.anchors.find(anchor => anchor.path !== normalize(exe) && anchor.path !== normalize(p.name));
+    return program ? [exe, program.path] : [exe];
+  }
+  const firstPositional = facts.anchors[0]?.rest[0];
+  return firstPositional ? [exe, firstPositional] : [exe];
+}
+
+function safeJobId(id: string): string {
+  return /^[A-Za-z0-9._:-]{1,80}$/.test(id) ? id : "unknown";
+}
+
 /** Build safe executable and entry-point facts without looking at cwd or prompt text. */
 export function analyzeCommand(p: Pick<RawOsProcess, "name" | "cmdline" | "argv">): CommandFacts {
-  let argv = p.argv?.length ? [...p.argv] : tokens(p.cmdline);
+  let argv = commandArgv(p);
   if (!argv.length) argv = [p.name];
   const exe = argv[0];
   const entry = argv.slice(1);
@@ -66,19 +143,26 @@ export function analyzeCommand(p: Pick<RawOsProcess, "name" | "cmdline" | "argv"
   let skippedWrapperSubcommand = false;
   for (let i = 0; i < entry.length; i++) {
     const token = entry[i];
-    if (token === "-m" && i + 1 < entry.length) {
+    if (token === "-m" && i + 1 < entry.length && isRoleInterpreter(base(exe)) && isSafeRoleToken(entry[i + 1])) {
       facts.module = {
         name: entry[i + 1].toLowerCase().replace(/\\/g, "/"),
         rest: positional(entry.slice(i + 2)),
       };
       break;
     }
-    if (SKIP_NEXT.has(token)) {
+    if (isValueTakingFlag(token)) {
       i++;
       continue;
     }
     if (token.startsWith("-")) continue;
+    if (!isSafeRoleToken(token)) continue;
     if (base(exe) === "env" && INLINE_ASSIGNMENT.test(token)) continue;
+    const isUvToolRun = base(exe) === "uv" && token.toLowerCase() === "tool" && entry[i + 1]?.toLowerCase() === "run";
+    if (isUvToolRun) {
+      skippedWrapperSubcommand = true;
+      i++;
+      continue;
+    }
     if (!skippedWrapperSubcommand && WRAPPER_SUBCOMMANDS.has(token.toLowerCase())) {
       skippedWrapperSubcommand = true;
       continue;
@@ -377,10 +461,16 @@ export function classifyTreeRoles(tree: RoleTreeInput): Map<number, RoleAssignme
   const harnessByPid = new Map<number, HarnessType | undefined>();
   const factsByPid = new Map<number, CommandFacts>();
   const nearestMeaningfulByPid = new Map<number, { pid: number; role: ProcessRole } | null>();
+  const roleHarnessByPid = new Map<number, HarnessType>();
 
   const getHarness = (process: RawOsProcess): HarnessType | undefined => {
     if (!harnessByPid.has(process.pid)) {
-      harnessByPid.set(process.pid, detectHarness({ name: process.name, cmdline: process.cmdline, argv: process.argv }));
+      const facts = getFacts(process);
+      harnessByPid.set(process.pid, detectHarness({
+        name: process.name,
+        cmdline: "",
+        argv: safeHarnessArgv(process, facts),
+      }));
     }
     return harnessByPid.get(process.pid);
   };
@@ -455,12 +545,14 @@ export function classifyTreeRoles(tree: RoleTreeInput): Map<number, RoleAssignme
     if (isRoot) {
       const kind = harnessKind(tree.harness);
       if (kind === "agent") {
+        roleHarnessByPid.set(p.pid, tree.harness);
         assign(p, "agent", tree.managed ? "job" : "harness", tree.managed
           ? `root of job ${tree.jobId} (${tree.harness})`
           : `root: harness ${tree.harness}`);
         continue;
       }
       if (kind === "server") {
+        roleHarnessByPid.set(p.pid, tree.harness);
         assign(p, "inference-server", tree.managed ? "job" : "harness", tree.managed
           ? `root of job ${tree.jobId} (${tree.harness})`
           : `root: harness ${tree.harness}`);
@@ -471,10 +563,12 @@ export function classifyTreeRoles(tree: RoleTreeInput): Map<number, RoleAssignme
       if (detected) {
         const detectedKind = harnessKind(detected);
         if (detectedKind === "agent") {
+          roleHarnessByPid.set(p.pid, detected);
           assign(p, "agent", "harness", `root: harness ${detected}`);
           continue;
         }
         if (detectedKind === "server") {
+          roleHarnessByPid.set(p.pid, detected);
           assign(p, "inference-server", "harness", `root: harness ${detected}`);
           continue;
         }
@@ -491,11 +585,11 @@ export function classifyTreeRoles(tree: RoleTreeInput): Map<number, RoleAssignme
       const nestedHarness = nestedHarnessId as HarnessType;
       const kind = harnessKind(nestedHarness);
       if (kind === "agent") {
-        assign(p, "subagent", "job", `nested job ${nestedJobId} (${nestedHarness})`);
+        assign(p, "subagent", "job", `nested job ${safeJobId(nestedJobId)} (${nestedHarness})`);
         continue;
       }
       if (kind === "server") {
-        assign(p, "inference-server", "job", `nested job ${nestedJobId} (${nestedHarness})`);
+        assign(p, "inference-server", "job", `nested job ${safeJobId(nestedJobId)} (${nestedHarness})`);
         continue;
       }
     }
@@ -508,7 +602,7 @@ export function classifyTreeRoles(tree: RoleTreeInput): Map<number, RoleAssignme
         const parent = byPid.get(p.ppid);
         const parentRole = parent && assignments.get(parent.pid)?.role;
         const parentHarness = parent
-          ? parent.pid === tree.rootPid ? tree.harness : getHarness(parent)
+          ? parent.pid === tree.rootPid ? roleHarnessByPid.get(parent.pid) ?? tree.harness : getHarness(parent)
           : undefined;
         if (parent && (parentRole === "agent" || parentRole === "subagent") && parentHarness === detected) {
           assign(p, parentRole, "harness", `launcher chain: harness ${detected} under pid ${parent.pid}`);
