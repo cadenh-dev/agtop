@@ -673,6 +673,62 @@ impl Workbench {
                     .child(
                         div()
                             .flex()
+                            .gap_6()
+                            .py_2()
+                            .child(Self::fact(
+                                "GPU",
+                                agent
+                                    .gpu_percent
+                                    .map(|v| format!("{v:.1}%"))
+                                    .unwrap_or_default(),
+                            ))
+                            .child(Self::fact(
+                                "NPU",
+                                agent
+                                    .npu_percent
+                                    .map(|v| format!("{v:.1}%"))
+                                    .unwrap_or_default(),
+                            ))
+                            .child(Self::fact(
+                                "GPU memory",
+                                agent
+                                    .gpu_memory_mb
+                                    .map(|v| format!("{v:.1} MiB"))
+                                    .unwrap_or_default(),
+                            )),
+                    )
+                    .child(Self::caption({
+                        let devices = agent
+                            .processes
+                            .iter()
+                            .flat_map(|process| &process.accelerators)
+                            .map(|usage| format!("{} {}", usage.kind, usage.device_id))
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        let device_line = if devices.is_empty() {
+                            "Devices: none observed".to_owned()
+                        } else {
+                            format!("Devices: {}", devices.join(", "))
+                        };
+                        let status =
+                            match (agent.gpu_percent.is_some(), agent.npu_percent.is_some()) {
+                                (true, true) => "GPU/NPU status: measured".to_owned(),
+                                (true, false) => {
+                                    "GPU status: measured · NPU: no measurement".to_owned()
+                                }
+                                (false, true) => {
+                                    "GPU: no measurement · NPU status: measured".to_owned()
+                                }
+                                (false, false) => {
+                                    "GPU/NPU status: no measurements available".to_owned()
+                                }
+                            };
+                        format!("{device_line}  |  {status}")
+                    }))
+                    .child(
+                        div()
+                            .flex()
                             .flex_col()
                             .gap_4()
                             .child(Self::fact("Repository", repo))
@@ -706,7 +762,9 @@ impl Workbench {
                             .child(div().w(px(120.)).child("Role"))
                             .child(div().w(px(64.)).child("PID"))
                             .child(div().w(px(64.)).child("CPU"))
-                            .child(div().w(px(84.)).child("Memory")),
+                            .child(div().w(px(84.)).child("Memory"))
+                            .child(div().w(px(64.)).child("GPU"))
+                            .child(div().w(px(64.)).child("NPU")),
                     )
                     .child(
                         div().flex().flex_col().children(
@@ -767,6 +825,8 @@ impl Workbench {
                                                 .w(px(84.))
                                                 .child(format!("{:.0} MiB", p.memory_mb)),
                                         )
+                                        .child(div().w(px(64.)).child(format_accel(p, "gpu")))
+                                        .child(div().w(px(64.)).child(format_accel(p, "npu")))
                                 },
                             ),
                         ),
@@ -845,6 +905,16 @@ fn filtered_agents<'a>(
 
 fn keep_role_filter(agents: &[Agent], role: Option<&str>) -> bool {
     role.is_none_or(|role| agents.iter().any(|agent| agent.has_role(role)))
+}
+
+fn format_accel(process: &crate::model::Process, kind: &str) -> String {
+    process
+        .accelerators
+        .iter()
+        .find(|usage| usage.kind == kind)
+        .and_then(|usage| usage.utilization_percent)
+        .map(|value| format!("{value:.1}%"))
+        .unwrap_or_default()
 }
 
 struct RoleTooltip(SharedString);
@@ -1111,10 +1181,10 @@ pub fn init(cx: &mut App) {
 mod tests {
     use super::{
         NEW_AGENT_SHORTCUT, QUIT_SHORTCUT, REFRESH_SHORTCUT, WorkbenchAction, cancel_confirmation,
-        fallback_harnesses, filtered_agents, keep_role_filter, matching_harnesses,
+        fallback_harnesses, filtered_agents, format_accel, keep_role_filter, matching_harnesses,
         refreshed_selection, request_stop, shortcut_action, validate_launch_arguments,
     };
-    use crate::model::{Agent, ROLE_ORDER, role_label};
+    use crate::model::{AcceleratorUsage, Agent, Process, ROLE_ORDER, role_label};
 
     fn agent(id: &str, harness: &str, branch: &str, pid: u32) -> Agent {
         Agent {
@@ -1150,6 +1220,22 @@ mod tests {
         );
         assert_eq!(filtered_agents(&agents, "5202", 0, None)[0].job_id, "job-2");
         assert!(filtered_agents(&agents, "missing", 0, None).is_empty());
+    }
+
+    #[test]
+    fn accelerator_columns_are_blank_when_unmeasured() {
+        let process = Process::default();
+        assert_eq!(format_accel(&process, "gpu"), "");
+        let process = Process {
+            accelerators: vec![AcceleratorUsage {
+                kind: "gpu".into(),
+                utilization_percent: Some(12.5),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(format_accel(&process, "gpu"), "12.5%");
+        assert_eq!(format_accel(&process, "npu"), "");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { ROLE_ORDER } from "../src/roles.js";
+import type { AcceleratorSource } from "../src/types.js";
 
 const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
 
@@ -18,5 +19,12 @@ describe("README documentation", () => {
 
   test("documents the reduced macOS scanner", () => {
     expect(readme).toContain("AGTOP_DARWIN_SCANNER=ps");
+  });
+
+  test("documents accelerator usage and every source", () => {
+    const section = readme.split("## GPU and NPU usage")[1]?.split("\n## ")[0] ?? "";
+    expect(section).not.toBe("");
+    const sources: AcceleratorSource[] = ["windows-pdh", "linux-drm-fdinfo", "nvml", "darwin-iokit", "none"];
+    for (const source of sources) expect(section).toContain(`\`${source}\``);
   });
 });
