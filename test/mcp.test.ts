@@ -428,11 +428,9 @@ test("OpenCode session metadata is appended to AGTOP_PEER when no peer is reques
   });
 }, 30000);
 
-// TerminateProcess does not run the stdio end/SIGINT/SIGTERM handler. The server
-// holds the Windows Job Object with kill-on-close, so the owned tree must die
-// with the server. Other platforms are skipped: process-group cleanup runs from
-// that handler, which an abrupt kill does not invoke.
-test.skipIf(process.platform !== "win32")("killing the MCP server process reaps owned jobs on Windows", async () => {
+// TerminateProcess does not run the stdio end/SIGINT/SIGTERM handler. Windows
+// uses Job Object kill-on-close; POSIX platforms use the detached crash-cleanup watchdog.
+test.skipIf(!["win32", "linux", "darwin"].includes(process.platform))("killing the MCP server process reaps owned jobs", async () => {
   const value = marker("crash");
   const pidFile = path.join(scratch, "crash-pids.json");
   const script = `const fs=require('fs');const cp=require('child_process');const child=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)',${JSON.stringify(value)}],{detached:true,stdio:'ignore'});child.unref();fs.writeFileSync(${JSON.stringify(pidFile)},JSON.stringify({root:process.pid,child:child.pid}));setInterval(()=>{},1000);`;

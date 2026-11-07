@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { execFileSync } from "node:child_process";
 import { windowsApi } from "./windows.js";
+import { darwinIdentities, darwinScannerMode } from "./darwin.js";
 import type { JobRecord } from "./types.js";
 
 export function stateDir(): string {
@@ -27,14 +28,18 @@ export function reserveJob(id: string, staleCheck = isStaleJob): () => void {
 }
 
 export interface ProcessIdentity { pid: number; startTime: string; pgid?: number; tag?: string }
-function processSnapshot(): ProcessIdentity[] {
-  if (process.platform === "win32") {
+export function processSnapshot(platform: NodeJS.Platform = process.platform): ProcessIdentity[] {
+  if (platform === "win32") {
     const script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,@{n='Start';e={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds().ToString()}}) | ConvertTo-Json -Compress";
     const raw = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 20000 });
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) || [];
     return (Array.isArray(parsed) ? parsed : [parsed]).map(p => ({ pid: Number(p.ProcessId), startTime: String(p.Start) }));
   }
-  if (process.platform !== "linux") throw new Error("Unsupported platform");
+  if (platform === "darwin") {
+    if (darwinScannerMode() === "ps") throw new Error("Stale-job checks require the native macOS process snapshot.");
+    return darwinIdentities();
+  }
+  if (platform !== "linux") throw new Error("Unsupported platform");
   return fs.readdirSync("/proc").filter(n => /^\d+$/.test(n)).flatMap(n => {
     try {
       const pid = Number(n), stat = fs.readFileSync(`/proc/${n}/stat`, "utf8"), end = stat.lastIndexOf(")"), fields = stat.slice(end + 2).trim().split(/\s+/);
@@ -51,27 +56,28 @@ function cgroupPids(dir: string): number[] {
   return pids;
 }
 /** Unknown or inaccessible containment state is kept as live. */
-export function isStaleJob(record: JobRecord, processes?: ProcessIdentity[], containedPids?: number[]): boolean {
+export function isStaleJob(record: JobRecord, processes?: ProcessIdentity[], containedPids?: number[], platform: NodeJS.Platform = process.platform): boolean {
   try {
     if (!/^\d+$/.test(record.startTime)) return false;
-    const snapshot = processes ?? processSnapshot();
+    const snapshot = processes ?? processSnapshot(platform);
     const root = snapshot.find(p => p.pid === record.rootPid);
     if (root?.startTime === record.startTime) return false;
     if (root && root.startTime !== record.startTime) { /* PID reuse: the recorded supervisor is dead. */ }
     else if (!root) { /* Missing supervisor. */ }
     else return false;
     if (record.mode === "win32-job-object") {
-      if (process.platform !== "win32" || !record.jobName) return false;
+      if (platform !== "win32" || !record.jobName) return false;
       const pids = containedPids ?? windowsApi().withJob(record.jobName, 4, h => windowsApi().pids(h));
       return pids !== undefined && pids.length === 0;
     }
     if (record.mode === "linux-cgroup") {
-      if (process.platform !== "linux" || !record.cgroupPath) return false;
+      if (platform !== "linux" || !record.cgroupPath) return false;
       if (containedPids) return containedPids.length === 0;
       try { return cgroupPids(record.cgroupPath).length === 0; }
       catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; throw e; }
     }
-    if (record.mode === "linux-env-pgid" && process.platform === "linux") {
+    if ((record.mode === "linux-env-pgid" && platform === "linux") ||
+      (record.mode === "darwin-env-pgid" && platform === "darwin")) {
       return !snapshot.some(p => p.tag === record.jobId || p.pgid === record.rootPid);
     }
     return false;
