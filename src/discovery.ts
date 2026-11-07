@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { RawOsProcess } from "./types.js";
 import { collectSocketConnections } from "./sockets.js";
-import { DarwinScannerError, darwinScannerMode, parseDarwinPs, readDarwinProcesses } from "./darwin.js";
+import { DarwinScannerError, darwinScannerMode, parseDarwinPs, readDarwinProcesses, type DarwinNative } from "./darwin.js";
 export { detectHarness, harnesses, harnessCatalog, harnessKind, harnessLabel, isLocalHarness } from "./harnesses.js";
 export type { HarnessDefinition, HarnessKind, HarnessRule } from "./harnesses.js";
 
@@ -73,8 +73,8 @@ export async function scanWindowsProcesses(): Promise<RawOsProcess[]> {
   await collectSocketConnections(results, "win32");
   return results;
 }
-export async function scanDarwinProcesses(): Promise<RawOsProcess[]> {
-  if (darwinScannerMode() === "ps") {
+export async function scanDarwinProcesses(native?: DarwinNative): Promise<RawOsProcess[]> {
+  if (!native && darwinScannerMode() === "ps") {
     const { stdout } = await exec("/bin/ps", ["-axww", "-o", "pid=,ppid=,pgid=,rss=,time=,lstart=,state=,command="], {
       encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024,
       env: { ...process.env, LC_ALL: "C" },
@@ -83,14 +83,14 @@ export async function scanDarwinProcesses(): Promise<RawOsProcess[]> {
     if (!results.length) throw new DarwinScannerError("macOS ps process scan returned no readable processes.");
     return results;
   }
-  const results: RawOsProcess[] = readDarwinProcesses().map(record => ({
+  const results: RawOsProcess[] = readDarwinProcesses(native).map(record => ({
     pid: record.pid, ppid: record.ppid, pgid: record.pgid, name: record.name,
     cmdline: record.argv?.join(" ") || record.execPath || record.name,
     argv: record.argv, startTime: record.startTime, cpuSeconds: record.cpuSeconds, cpuPercent: 0,
     memoryMb: record.residentBytes / 1_048_576, cwd: record.cwd,
     envTags: parseEnvironment(record.env.join("\0")), state: darwinState(record.status),
   }));
-  await collectSocketConnections(results, "darwin");
+  if (!native) await collectSocketConnections(results, "darwin");
   return results;
 }
 function darwinState(status: number): string {

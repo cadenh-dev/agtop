@@ -133,10 +133,14 @@ export function parseWindowsTcpTable(data: Buffer, family: 2 | 23): TcpRow[] {
 }
 
 /** Attach one socket snapshot to the process snapshot. Errors only omit socket evidence. */
-export async function collectSocketConnections(processes: RawOsProcess[], platform: NodeJS.Platform = process.platform): Promise<void> {
+export async function collectSocketConnections(
+  processes: RawOsProcess[],
+  platform: NodeJS.Platform = process.platform,
+  loadDarwinRows: typeof darwinTcpRows = darwinTcpRows,
+): Promise<void> {
   try {
     const rows = platform !== process.platform ? [] : platform === "linux" ? await linuxRows()
-      : platform === "win32" ? windowsRows() : platform === "darwin" ? darwinTcpRows(processes.map(proc => proc.pid)) : [];
+      : platform === "win32" ? windowsRows() : platform === "darwin" ? loadDarwinRows(processes.map(proc => proc.pid)) : [];
     const byPid = new Map(processes.map(proc => [proc.pid, proc]));
     for (const [pid, connections] of attributeTcpRows(rows, processes)) {
       const proc = byPid.get(pid);

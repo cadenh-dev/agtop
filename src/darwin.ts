@@ -1,6 +1,6 @@
 import path from "node:path";
 import koffi from "koffi";
-import type { TcpRow } from "./sockets.js";
+import { formatIpv4, formatIpv6, type TcpRow } from "./sockets.js";
 import type { RawOsProcess } from "./types.js";
 
 const PROC_PIDLISTFDS = 1;
@@ -17,31 +17,101 @@ const INI_IPV4 = 0x1;
 const INI_IPV6 = 0x2;
 const TSI_S_LISTEN = 1;
 const TSI_S_ESTABLISHED = 4;
-const SIDL = 1;
-const SRUN = 2;
-const SSLEEP = 3;
-const SSTOP = 4;
 const SZOMB = 5;
 const CTL_KERN = 1;
 const KERN_ARGMAX = 8;
 const KERN_PROC = 14;
 const KERN_PROC_PID = 1;
 const KERN_PROCARGS2 = 49;
-const EPERM = 1;
 const ESRCH = 3;
-const ENOMEM = 12;
 const PROC_PIDPATHINFO_MAXSIZE = 4096;
 const MAXPATHLEN = 1024;
 const MAXCOMLEN = 16;
-const PROC_BSDINFO_SIZE = 136;
-const PROC_TASKALLINFO_SIZE = 232;
-const PROC_BSDSHORTINFO_SIZE = 64;
-const PROC_VNODEPATHINFO_SIZE = 2352;
-const KINFO_PROC_SIZE = 648;
-const PROC_FDINFO_SIZE = 8;
-const SOCKET_FDINFO_SIZE = 792;
 const TCP_PROTOCOL = 6;
 const REMEDY = "Set AGTOP_DARWIN_SCANNER=ps for the reduced read-only scanner.";
+
+/** Layout values used by the byte readers below; checked against the macOS SDK in darwin-live.test.ts. */
+export const DARWIN_ABI_LAYOUT = Object.freeze({
+  "proc_bsdinfo.size": 136,
+  "proc_bsdinfo.pbi_status": 4,
+  "proc_bsdinfo.pbi_pid": 12,
+  "proc_bsdinfo.pbi_ppid": 16,
+  "proc_bsdinfo.pbi_uid": 20,
+  "proc_bsdinfo.pbi_comm": 48,
+  "proc_bsdinfo.pbi_name": 64,
+  "proc_bsdinfo.pbi_nfiles": 96,
+  "proc_bsdinfo.pbi_pgid": 100,
+  "proc_bsdinfo.pbi_start_tvsec": 120,
+  "proc_bsdinfo.pbi_start_tvusec": 128,
+  "proc_taskinfo.size": 96,
+  "proc_taskinfo.pti_resident_size": 8,
+  "proc_taskinfo.pti_total_user": 16,
+  "proc_taskinfo.pti_total_system": 24,
+  "proc_taskallinfo.size": 232,
+  "proc_taskallinfo.pbsd": 0,
+  "proc_taskallinfo.ptinfo": 136,
+  "proc_taskallinfo.ptinfo.pti_resident_size": 144,
+  "proc_taskallinfo.ptinfo.pti_total_user": 152,
+  "proc_taskallinfo.ptinfo.pti_total_system": 160,
+  "proc_bsdshortinfo.size": 64,
+  "proc_bsdshortinfo.pbsi_pid": 0,
+  "proc_bsdshortinfo.pbsi_ppid": 4,
+  "proc_bsdshortinfo.pbsi_pgid": 8,
+  "proc_bsdshortinfo.pbsi_status": 12,
+  "proc_bsdshortinfo.pbsi_comm": 16,
+  "proc_bsdshortinfo.pbsi_uid": 36,
+  "vnode_info.size": 152,
+  "vnode_info_path.size": 1176,
+  "vnode_info_path.vip_vi": 0,
+  "vnode_info_path.vip_path": 152,
+  "proc_vnodepathinfo.size": 2352,
+  "proc_vnodepathinfo.pvi_cdir": 0,
+  "proc_vnodepathinfo.pvi_rdir": 1176,
+  "proc_vnodepathinfo.cwd_path": 152,
+  "kinfo_proc.size": 648,
+  "kinfo_proc.kp_proc.p_starttime.tv_sec": 0,
+  "kinfo_proc.kp_proc.p_starttime.tv_usec": 8,
+  "kinfo_proc.kp_proc.p_pid": 40,
+  "proc_fdinfo.size": 8,
+  "proc_fdinfo.proc_fd": 0,
+  "proc_fdinfo.proc_fdtype": 4,
+  "proc_fileinfo.size": 24,
+  "socket_info.size": 768,
+  "socket_info.soi_protocol": 156,
+  "socket_info.soi_family": 160,
+  "socket_info.soi_kind": 232,
+  "socket_info.soi_proto": 240,
+  "in_sockinfo.size": 80,
+  "in_sockinfo.insi_fport": 0,
+  "in_sockinfo.insi_lport": 4,
+  "in_sockinfo.insi_vflag": 24,
+  "in_sockinfo.insi_faddr": 32,
+  "in_sockinfo.insi_laddr": 48,
+  "tcp_sockinfo.size": 120,
+  "tcp_sockinfo.tcpsi_ini": 0,
+  "tcp_sockinfo.tcpsi_state": 80,
+  "socket_fdinfo.size": 792,
+  "socket_fdinfo.pfi": 0,
+  "socket_fdinfo.psi": 24,
+  "socket_fdinfo.psi.soi_protocol": 180,
+  "socket_fdinfo.psi.soi_family": 184,
+  "socket_fdinfo.psi.soi_kind": 256,
+  "socket_fdinfo.psi.soi_proto.pri_tcp": 264,
+  "socket_fdinfo.insi_fport": 264,
+  "socket_fdinfo.insi_lport": 268,
+  "socket_fdinfo.insi_vflag": 288,
+  "socket_fdinfo.insi_faddr": 296,
+  "socket_fdinfo.insi_laddr": 312,
+  "socket_fdinfo.tcpsi_state": 344,
+} as const);
+
+const PROC_BSDINFO_SIZE = DARWIN_ABI_LAYOUT["proc_bsdinfo.size"];
+const PROC_TASKALLINFO_SIZE = DARWIN_ABI_LAYOUT["proc_taskallinfo.size"];
+const PROC_BSDSHORTINFO_SIZE = DARWIN_ABI_LAYOUT["proc_bsdshortinfo.size"];
+const PROC_VNODEPATHINFO_SIZE = DARWIN_ABI_LAYOUT["proc_vnodepathinfo.size"];
+const KINFO_PROC_SIZE = DARWIN_ABI_LAYOUT["kinfo_proc.size"];
+const PROC_FDINFO_SIZE = DARWIN_ABI_LAYOUT["proc_fdinfo.size"];
+const SOCKET_FDINFO_SIZE = DARWIN_ABI_LAYOUT["socket_fdinfo.size"];
 
 type NativeFn = (...args: any[]) => any;
 type KoffiRuntime = {
@@ -93,90 +163,81 @@ function cString(buf: Buffer, offset: number, length: number): string {
 }
 
 function startFromBsd(buf: Buffer): string {
-  const seconds = buf.readBigUInt64LE(120);
-  const micros = buf.readBigUInt64LE(128);
+  const seconds = buf.readBigUInt64LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_start_tvsec"]);
+  const micros = buf.readBigUInt64LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_start_tvusec"]);
   return String(seconds * 1_000_000n + micros);
 }
 
-function statusLetter(status: number): string {
-  switch (status) {
-    case SIDL: return "I";
-    case SRUN: return "R";
-    case SSLEEP: return "S";
-    case SSTOP: return "T";
-    case SZOMB: return "Z";
-    default: return "?";
-  }
-}
-
 export function parseTaskAllInfo(buf: Buffer): {
-  pid: number; ppid: number; pgid: number; status: number; comm: string; name: string;
+  pid: number; ppid: number; pgid: number; uid: number; status: number; comm: string; name: string;
   nfiles: number; startTime: string; residentBytes: bigint; userTicks: bigint; systemTicks: bigint;
 } {
   needSize(buf, PROC_TASKALLINFO_SIZE, "proc_taskallinfo");
   return {
-    status: buf.readUInt32LE(4), pid: buf.readUInt32LE(12), ppid: buf.readUInt32LE(16),
-    comm: cString(buf, 48, MAXCOMLEN), name: cString(buf, 64, 32), nfiles: buf.readUInt32LE(96),
-    pgid: buf.readUInt32LE(100), startTime: startFromBsd(buf), residentBytes: buf.readBigUInt64LE(144),
-    userTicks: buf.readBigUInt64LE(152), systemTicks: buf.readBigUInt64LE(160),
+    status: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_status"]),
+    pid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_pid"]),
+    ppid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_ppid"]),
+    uid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_uid"]),
+    comm: cString(buf, DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_comm"], MAXCOMLEN),
+    name: cString(buf, DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_name"], 32),
+    nfiles: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_nfiles"]),
+    pgid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_pgid"]), startTime: startFromBsd(buf),
+    residentBytes: buf.readBigUInt64LE(DARWIN_ABI_LAYOUT["proc_taskallinfo.ptinfo.pti_resident_size"]),
+    userTicks: buf.readBigUInt64LE(DARWIN_ABI_LAYOUT["proc_taskallinfo.ptinfo.pti_total_user"]),
+    systemTicks: buf.readBigUInt64LE(DARWIN_ABI_LAYOUT["proc_taskallinfo.ptinfo.pti_total_system"]),
   };
 }
 
 export function parseShortBsdInfo(buf: Buffer): { pid: number; ppid: number; pgid: number; status: number; comm: string; uid: number } {
   needSize(buf, PROC_BSDSHORTINFO_SIZE, "proc_bsdshortinfo");
   return {
-    pid: buf.readUInt32LE(0), ppid: buf.readUInt32LE(4), pgid: buf.readUInt32LE(8), status: buf.readUInt32LE(12),
-    comm: cString(buf, 16, MAXCOMLEN), uid: buf.readUInt32LE(36),
+    pid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdshortinfo.pbsi_pid"]),
+    ppid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdshortinfo.pbsi_ppid"]),
+    pgid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdshortinfo.pbsi_pgid"]),
+    status: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdshortinfo.pbsi_status"]),
+    comm: cString(buf, DARWIN_ABI_LAYOUT["proc_bsdshortinfo.pbsi_comm"], MAXCOMLEN),
+    uid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdshortinfo.pbsi_uid"]),
   };
 }
 
 export function parseVnodeCwd(buf: Buffer): string | undefined {
   if (buf.length < 152) return;
-  const raw = cString(buf, 152, Math.min(MAXPATHLEN, buf.length - 152));
+  const offset = DARWIN_ABI_LAYOUT["proc_vnodepathinfo.cwd_path"];
+  const raw = cString(buf, offset, Math.min(MAXPATHLEN, buf.length - offset));
   return raw || undefined;
-}
-
-function decodeIpv4(bytes: Buffer): string {
-  return `${bytes[0]}.${bytes[1]}.${bytes[2]}.${bytes[3]}`;
-}
-
-function decodeIpv6(bytes: Buffer): string {
-  const words = Array.from({ length: 8 }, (_, i) => ((bytes[i * 2] << 8) | bytes[i * 2 + 1]).toString(16));
-  if (words.slice(0, 5).every(word => word === "0") && words[5] === "ffff") return `::ffff:${decodeIpv4(bytes.subarray(12, 16))}`;
-  return words.join(":");
 }
 
 export function parseSocketFdInfo(buf: Buffer): {
   family: number; state: number; localAddress: string; localPort: number; remoteAddress: string; remotePort: number;
 } | undefined {
   if (buf.length < SOCKET_FDINFO_SIZE) return;
-  const protocol = buf.readInt32LE(180);
-  const family = buf.readInt32LE(184);
-  const kind = buf.readInt32LE(256);
-  const vflag = buf.readUInt8(288);
+  const protocol = buf.readInt32LE(DARWIN_ABI_LAYOUT["socket_fdinfo.psi.soi_protocol"]);
+  const family = buf.readInt32LE(DARWIN_ABI_LAYOUT["socket_fdinfo.psi.soi_family"]);
+  const kind = buf.readInt32LE(DARWIN_ABI_LAYOUT["socket_fdinfo.psi.soi_kind"]);
+  const vflag = buf.readUInt8(DARWIN_ABI_LAYOUT["socket_fdinfo.insi_vflag"]);
   if (kind !== SOCKINFO_TCP || protocol !== TCP_PROTOCOL || (family !== AF_INET && family !== AF_INET6)) return;
-  const localPort = buf.readUInt16BE(268);
-  const remotePort = buf.readUInt16BE(264);
-  const state = buf.readInt32LE(344);
+  const localPort = buf.readUInt16BE(DARWIN_ABI_LAYOUT["socket_fdinfo.insi_lport"]);
+  const remotePort = buf.readUInt16BE(DARWIN_ABI_LAYOUT["socket_fdinfo.insi_fport"]);
+  const state = buf.readInt32LE(DARWIN_ABI_LAYOUT["socket_fdinfo.tcpsi_state"]);
   if (vflag & INI_IPV6) {
     return {
-      family, state, localAddress: decodeIpv6(buf.subarray(312, 328)), localPort,
-      remoteAddress: decodeIpv6(buf.subarray(296, 312)), remotePort,
+      family, state, localAddress: formatIpv6(buf.subarray(DARWIN_ABI_LAYOUT["socket_fdinfo.insi_laddr"], DARWIN_ABI_LAYOUT["socket_fdinfo.insi_laddr"] + 16)), localPort,
+      remoteAddress: formatIpv6(buf.subarray(DARWIN_ABI_LAYOUT["socket_fdinfo.insi_faddr"], DARWIN_ABI_LAYOUT["socket_fdinfo.insi_faddr"] + 16)), remotePort,
     };
   }
   if (vflag & INI_IPV4) {
     return {
-      family, state, localAddress: decodeIpv4(buf.subarray(324, 328)), localPort,
-      remoteAddress: decodeIpv4(buf.subarray(308, 312)), remotePort,
+      family, state, localAddress: formatIpv4(buf.subarray(DARWIN_ABI_LAYOUT["socket_fdinfo.insi_laddr"] + 12, DARWIN_ABI_LAYOUT["socket_fdinfo.insi_laddr"] + 16)), localPort,
+      remoteAddress: formatIpv4(buf.subarray(DARWIN_ABI_LAYOUT["socket_fdinfo.insi_faddr"] + 12, DARWIN_ABI_LAYOUT["socket_fdinfo.insi_faddr"] + 16)), remotePort,
     };
   }
   return;
 }
 
 export function parseKinfoStart(buf: Buffer, pid: number): string | undefined {
-  if (buf.length < KINFO_PROC_SIZE || buf.readInt32LE(40) !== pid) return;
-  const seconds = buf.readBigInt64LE(0);
-  const micros = buf.readInt32LE(8);
+  if (buf.length < KINFO_PROC_SIZE || buf.readInt32LE(DARWIN_ABI_LAYOUT["kinfo_proc.kp_proc.p_pid"]) !== pid) return;
+  const seconds = buf.readBigInt64LE(DARWIN_ABI_LAYOUT["kinfo_proc.kp_proc.p_starttime.tv_sec"]);
+  const micros = buf.readInt32LE(DARWIN_ABI_LAYOUT["kinfo_proc.kp_proc.p_starttime.tv_usec"]);
   if (seconds < 0n || micros < 0 || micros >= 1_000_000) return;
   return String(seconds * 1_000_000n + BigInt(micros));
 }
@@ -201,8 +262,9 @@ export function parseProcArgs2(buf: Buffer, length: number): { execPath: string;
   if (pathEnd < cursor || pathEnd >= end) return;
   const execPath = buf.toString("utf8", cursor, pathEnd);
   if (!execPath) return;
-  cursor = pathEnd + 1;
-  while (cursor < end && buf[cursor] === 0) cursor++;
+  // KERN_PROCARGS2 pads the exec path to the next pointer boundary. Skip only
+  // that padding so an empty argv[0] remains distinguishable from padding.
+  cursor = Math.min(end, (pathEnd + 1 + 7) & ~7);
   const argv: string[] = [];
   for (let i = 0; i < argc; i++) {
     if (cursor >= end) break;
@@ -249,11 +311,30 @@ function checkAbi(native: DarwinNative): void {
   if (info!.pid !== process.pid || info!.ppid !== process.ppid) {
     abiFailure("proc_pidinfo(PROC_PIDTASKALLINFO)", `reported pid/ppid ${info!.pid}/${info!.ppid}; expected ${process.pid}/${process.ppid}`);
   }
+  let kinfo: Buffer | undefined;
+  try { kinfo = native.kinfoProc(process.pid); }
+  catch (error) { abiFailure("sysctl(KERN_PROC_PID)", String(error)); }
+  const identity = kinfo && parseKinfoStart(kinfo, process.pid);
+  if (identity !== info!.startTime) {
+    abiFailure("sysctl(KERN_PROC_PID)", `reported start time ${identity ?? "unavailable"}; expected ${info!.startTime}`);
+  }
   let short: ReturnType<DarwinNative["pidInfo"]>;
   try { short = native.pidInfo(process.pid, PROC_PIDT_SHORTBSDINFO, PROC_BSDSHORTINFO_SIZE); }
   catch (error) { abiFailure("proc_pidinfo(PROC_PIDT_SHORTBSDINFO)", String(error)); }
   if (short.bytes !== PROC_BSDSHORTINFO_SIZE) {
     abiFailure("proc_pidinfo(PROC_PIDT_SHORTBSDINFO)", `${short.bytes} bytes, errno ${short.errno}; expected ${PROC_BSDSHORTINFO_SIZE}`);
+  }
+  let shortInfo: ReturnType<typeof parseShortBsdInfo>;
+  try { shortInfo = parseShortBsdInfo(short.data); }
+  catch (error) { abiFailure("proc_pidinfo(PROC_PIDT_SHORTBSDINFO)", String(error)); }
+  const expectedUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (expectedUid !== undefined && info!.uid !== expectedUid) {
+    abiFailure("proc_pidinfo(PROC_PIDTASKALLINFO)", `reported pbi_uid ${info!.uid}; expected ${expectedUid}`);
+  }
+  if (shortInfo!.pid !== process.pid || shortInfo!.ppid !== process.ppid ||
+    (expectedUid !== undefined && shortInfo!.uid !== expectedUid)) {
+    abiFailure("proc_pidinfo(PROC_PIDT_SHORTBSDINFO)",
+      `reported pid/ppid/uid ${shortInfo!.pid}/${shortInfo!.ppid}/${shortInfo!.uid}; expected ${process.pid}/${process.ppid}/${expectedUid ?? "current uid"}`);
   }
   checkedNatives.add(native as object);
 }
@@ -272,7 +353,7 @@ function createNative(): DarwinNative {
 
   const callInfo = (pid: number, flavor: number, size: number) => {
     const data = Buffer.alloc(size);
-    const bytes = proc_pidinfo(pid, flavor, 0, data, size) as number;
+    const bytes = proc_pidinfo(pid, flavor, 0, size === 0 ? null : data, size) as number;
     const error = bytes === 0 || bytes === -1 ? runtime.errno() : 0;
     return { data, bytes, errno: error };
   };
@@ -325,7 +406,10 @@ function createNative(): DarwinNative {
     pidPath(pid) {
       const data = Buffer.alloc(PROC_PIDPATHINFO_MAXSIZE);
       const bytes = proc_pidpath(pid, data, data.length) as number;
-      if (bytes <= 0) { runtime.errno(); return; }
+      if (bytes <= 0) {
+        const error = runtime.errno();
+        throw new DarwinScannerError(`proc_pidpath(${pid}) failed (result ${bytes}, errno ${error}). ${REMEDY}`);
+      }
       return cString(data, 0, Math.min(bytes, data.length)) || undefined;
     },
     procArgs(pid) {
@@ -339,7 +423,7 @@ function createNative(): DarwinNative {
       const buffer = argsBuffer!;
       const result = mibCall([CTL_KERN, KERN_PROCARGS2, pid], buffer, buffer.length);
       if (result.result !== 0) return;
-      return buffer.subarray(0, Math.min(result.length, buffer.length));
+      return Buffer.from(buffer.subarray(0, Math.min(result.length, buffer.length)));
     },
     kinfoProc(pid) {
       const data = Buffer.alloc(KINFO_PROC_SIZE);
@@ -368,7 +452,23 @@ export function nativeDarwin(): DarwinNative {
 
 function readBsdInfo(buf: Buffer): { pid: number; ppid: number; pgid: number; status: number; startTime: string } {
   needSize(buf, PROC_BSDINFO_SIZE, "proc_bsdinfo");
-  return { pid: buf.readUInt32LE(12), ppid: buf.readUInt32LE(16), status: buf.readUInt32LE(4), pgid: buf.readUInt32LE(100), startTime: startFromBsd(buf) };
+  return {
+    pid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_pid"]),
+    ppid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_ppid"]),
+    status: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_status"]),
+    pgid: buf.readUInt32LE(DARWIN_ABI_LAYOUT["proc_bsdinfo.pbi_pgid"]), startTime: startFromBsd(buf),
+  };
+}
+
+const DARWIN_ENV_ALLOWLIST = new Set([
+  "AGTOP_JOB_ID", "AGTOP_HARNESS", "AGTOP_PEER", "AGTOP_WORKTREE", "AGTOP_BACKEND",
+  "OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL",
+]);
+function filteredDarwinEnvironment(env: string[]): string[] {
+  return env.filter(entry => {
+    const eq = entry.indexOf("=");
+    return eq >= 0 && DARWIN_ENV_ALLOWLIST.has(entry.slice(0, eq));
+  });
 }
 
 export function readDarwinProcesses(native: DarwinNative = nativeDarwin()): DarwinProcessRecord[] {
@@ -405,7 +505,7 @@ export function readDarwinProcesses(native: DarwinNative = nativeDarwin()): Darw
       const name = path.posix.basename(execPath || bsd.name || bsd.comm);
       const argv = args?.argv ?? (execPath ? [execPath] : undefined);
       records.push({ pid, ppid: bsd.ppid, pgid: bsd.pgid, status: bsd.status, name, execPath, argv,
-        env: args?.env ?? [], cwd, startTime: bsd.startTime,
+        env: filteredDarwinEnvironment(args?.env ?? []), cwd, startTime: bsd.startTime,
         cpuSeconds: machTicksToSeconds(bsd.userTicks, bsd.systemTicks, native.timebase),
         residentBytes: Number(bsd.residentBytes), restricted: false });
       continue;
@@ -447,17 +547,21 @@ export function darwinIdentities(native: DarwinNative = nativeDarwin()): Array<{
 export function darwinTcpRows(pids: number[], native: DarwinNative = nativeDarwin()): TcpRow[] {
   const rows: TcpRow[] = [];
   for (const pid of new Set(pids)) {
-    let capacity = 64;
+    const maxBytes = 65_536 * PROC_FDINFO_SIZE;
     let fdResult: { data: Buffer; bytes: number; errno: number } | undefined;
-    while (true) {
-      const bufferSize = capacity * PROC_FDINFO_SIZE;
-      try { fdResult = native.pidInfo(pid, PROC_PIDLISTFDS, bufferSize); }
-      catch { fdResult = undefined; break; }
-      if (fdResult.bytes !== bufferSize || capacity >= 65_536) break;
-      capacity = Math.min(65_536, capacity * 2);
-    }
-    if (!fdResult || fdResult.bytes < 0 || fdResult.bytes % PROC_FDINFO_SIZE !== 0) continue;
-    const count = Math.min(Math.floor(fdResult.bytes / PROC_FDINFO_SIZE), capacity);
+    let capacityBytes: number;
+    try {
+      const sizing = native.pidInfo(pid, PROC_PIDLISTFDS, 0);
+      if (sizing.bytes <= 0 || sizing.bytes % PROC_FDINFO_SIZE !== 0) continue;
+      capacityBytes = Math.min(maxBytes, Math.max(PROC_FDINFO_SIZE, sizing.bytes));
+      while (true) {
+        fdResult = native.pidInfo(pid, PROC_PIDLISTFDS, capacityBytes);
+        if (fdResult.bytes !== capacityBytes || capacityBytes >= maxBytes) break;
+        capacityBytes = Math.min(maxBytes, capacityBytes * 2);
+      }
+    } catch { continue; }
+    if (!fdResult || fdResult.bytes < 0 || fdResult.bytes > capacityBytes || fdResult.bytes % PROC_FDINFO_SIZE !== 0) continue;
+    const count = Math.floor(fdResult.bytes / PROC_FDINFO_SIZE);
     for (let i = 0; i < count; i++) {
       const offset = i * PROC_FDINFO_SIZE;
       const fd = fdResult.data.readInt32LE(offset);

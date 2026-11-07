@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseEnvironment } from "../src/discovery.js";
+import { parseEnvironment, scanDarwinProcesses } from "../src/discovery.js";
 import {
   DarwinScannerError, darwinIdentity, darwinTcpRows, parseDarwinPs, parseKinfoStart, parseProcArgs2,
   parseShortBsdInfo, parseSocketFdInfo, parseTaskAllInfo, parseVnodeCwd, machTicksToSeconds, readDarwinProcesses,
@@ -8,11 +8,12 @@ import {
 import { collectSocketConnections } from "../src/sockets.js";
 import type { RawOsProcess } from "../src/types.js";
 
-function taskInfo(input: { pid: number; ppid: number; pgid?: number; status?: number; comm?: string; name?: string; sec?: bigint; usec?: bigint; rss?: bigint; user?: bigint; system?: bigint }): Buffer {
+function taskInfo(input: { pid: number; ppid: number; pgid?: number; status?: number; uid?: number; comm?: string; name?: string; sec?: bigint; usec?: bigint; rss?: bigint; user?: bigint; system?: bigint }): Buffer {
   const buf = Buffer.alloc(232);
   buf.writeUInt32LE(input.status ?? 2, 4);
   buf.writeUInt32LE(input.pid, 12);
   buf.writeUInt32LE(input.ppid, 16);
+  buf.writeUInt32LE(input.uid ?? (typeof process.getuid === "function" ? process.getuid() : 501), 20);
   Buffer.from(input.comm ?? "process").copy(buf, 48);
   Buffer.from(input.name ?? "process-name").copy(buf, 64);
   buf.writeUInt32LE(17, 96);
@@ -35,7 +36,10 @@ function shortInfo(input: { pid: number; ppid: number; pgid?: number; status?: n
 
 function procArgs(path: string, argv: string[], env: string[]): Buffer {
   const argc = Buffer.alloc(4); argc.writeInt32LE(argv.length);
-  return Buffer.concat([argc, Buffer.from(`${path}\0\0`, "utf8"), ...argv.map(arg => Buffer.from(`${arg}\0`, "utf8")),
+  const execPath = Buffer.from(`${path}\0`, "utf8");
+  const prefixLength = argc.length + execPath.length;
+  const padding = Buffer.alloc((8 - (prefixLength % 8)) % 8);
+  return Buffer.concat([argc, execPath, padding, ...argv.map(arg => Buffer.from(`${arg}\0`, "utf8")),
     ...env.map(value => Buffer.from(`${value}\0`, "utf8")), Buffer.from("\0")]);
 }
 
@@ -52,6 +56,12 @@ function socketInfo(options: { family?: number; kind?: number; protocol?: number
   buf.writeUInt16BE(options.localPort ?? 50_000, 268); buf.writeUInt8(options.vflag ?? 1, 288);
   buf.writeInt32LE(options.state ?? 4, 344);
   const encode = (address: string) => {
+    if (address.startsWith("::ffff:")) {
+      const mapped = Buffer.alloc(16);
+      mapped[10] = 0xff; mapped[11] = 0xff;
+      Buffer.from(address.slice("::ffff:".length).split(".").map(Number)).copy(mapped, 12);
+      return mapped;
+    }
     if (address.includes(":")) return Buffer.from(address.replace(/:/g, "").padStart(32, "0"), "hex");
     return Buffer.from(address.split(".").map(Number));
   };
@@ -70,7 +80,7 @@ function success(data: Buffer) { return { data, bytes: data.length, errno: 0 }; 
 
 function fakeNative(pids: number[], overrides: Partial<DarwinNative> & { pidInfo?: DarwinNative["pidInfo"] } = {}): DarwinNative {
   const ownTask = taskInfo({ pid: process.pid, ppid: process.ppid, comm: "bun", name: "Bun" });
-  const ownShort = shortInfo({ pid: process.pid, ppid: process.ppid });
+  const ownShort = shortInfo({ pid: process.pid, ppid: process.ppid, uid: typeof process.getuid === "function" ? process.getuid() : 501 });
   const native: DarwinNative = {
     timebase: { numer: 125, denom: 3 },
     listAllPids: () => pids,
@@ -108,10 +118,19 @@ describe("Darwin fixed-layout parsing", () => {
     expect(parseVnodeCwd(Buffer.alloc(100))).toBeUndefined();
   });
 
-  test("parses KERN_PROCARGS2 padding, empty and Unicode argv, and environment", () => {
+  test("parses KERN_PROCARGS2 alignment padding, empty and Unicode argv, and environment", () => {
     const parsed = parseProcArgs2(procArgs("/Applications/Aгtop.app/Contents/MacOS/agtop", ["agtop", "--empty", "", "雪"], ["AGTOP_JOB_ID=live-x", "PATH=/bin"]), 2048);
     expect(parsed).toEqual({ execPath: "/Applications/Aгtop.app/Contents/MacOS/agtop", argv: ["agtop", "--empty", "", "雪"], env: ["AGTOP_JOB_ID=live-x", "PATH=/bin"] });
     expect(parseEnvironment(parsed!.env.join("\0"))).toEqual({ AGTOP_JOB_ID: "live-x" });
+  });
+
+  test("preserves an empty argv[0] and accepts argc zero", () => {
+    expect(parseProcArgs2(procArgs("/bin/tool", [""], ["AGTOP_JOB_ID=empty-zero"]), 2048)).toEqual({
+      execPath: "/bin/tool", argv: [""], env: ["AGTOP_JOB_ID=empty-zero"],
+    });
+    expect(parseProcArgs2(procArgs("/bin/tool", [], ["AGTOP_JOB_ID=no-args"]), 2048)).toEqual({
+      execPath: "/bin/tool", argv: [], env: ["AGTOP_JOB_ID=no-args"],
+    });
   });
 
   test("bounds malformed and truncated KERN_PROCARGS2 input", () => {
@@ -137,6 +156,9 @@ describe("Darwin fixed-layout parsing", () => {
     const wildcard = parseSocketFdInfo(socketInfo({ family: 30, vflag: 2, state: 1, local: "::", remote: "::", localPort: 80 }));
     expect(wildcard?.localAddress).toBe("0:0:0:0:0:0:0:0");
     expect(parseSocketFdInfo(socketInfo({ family: 30, vflag: 1, state: 4, local: "127.0.0.1", remote: "127.0.0.1" }))).toMatchObject({ family: 30, localAddress: "127.0.0.1", remoteAddress: "127.0.0.1" });
+    expect(parseSocketFdInfo(socketInfo({ family: 30, vflag: 2, state: 4, local: "::ffff:127.0.0.1", remote: "::ffff:127.0.0.1" }))).toMatchObject({
+      localAddress: "::ffff:127.0.0.1", remoteAddress: "::ffff:127.0.0.1",
+    });
   });
 
   test("ignores non-TCP socket kinds, UDP, unsupported families, and truncated fdinfo", () => {
@@ -190,7 +212,7 @@ describe("fake libproc scans", () => {
         return fakeNative([], {}).pidInfo(pid, flavor, 0);
       },
       pidPath: pid => pid === target ? "/usr/libexec/daemon" : undefined,
-      kinfoProc: pid => kinfo(pid, 1_700_000_001n, 654_321),
+      kinfoProc: pid => pid === target ? kinfo(pid, 1_700_000_001n, 654_321) : kinfo(pid),
     });
     const record = readDarwinProcesses(native)[0];
     expect(record).toMatchObject({ pid: target, ppid: 1, pgid: 1, name: "daemon", execPath: "/usr/libexec/daemon", argv: ["/usr/libexec/daemon"], env: [], cwd: undefined, startTime: "1700000001654321", cpuSeconds: 0, residentBytes: 0, restricted: true });
@@ -201,7 +223,7 @@ describe("fake libproc scans", () => {
     const native = fakeNative([gone, reused, stable], {
       pidInfo(pid, flavor, size) {
         if (pid === process.pid && flavor === 2) return success(taskInfo({ pid, ppid: process.ppid }));
-        if (pid === process.pid && flavor === 13) return success(shortInfo({ pid, ppid: process.ppid }));
+        if (pid === process.pid && flavor === 13) return success(shortInfo({ pid, ppid: process.ppid, uid: typeof process.getuid === "function" ? process.getuid() : 501 }));
         if (pid === gone && flavor === 2) return { data: Buffer.alloc(size), bytes: 0, errno: 3 };
         if ((pid === reused || pid === stable) && flavor === 2) return success(taskInfo({ pid, ppid: 1, sec: BigInt(pid) }));
         if (pid === reused && flavor === 3) return success(taskInfo({ pid, ppid: 1, sec: 999n }).subarray(0, 136));
@@ -221,27 +243,114 @@ describe("fake libproc scans", () => {
     const abi = fakeNative([], { pidInfo: (pid, flavor, size) => flavor === 2 && pid === process.pid
       ? { data: Buffer.alloc(size), bytes: 0, errno: 12 }
       : { data: Buffer.alloc(size), bytes: 0, errno: 3 } });
-    expect(() => readDarwinProcesses(abi)).toThrow(/proc_pidinfo\(PROC_PIDTASKALLINFO\).*ENOMEM|errno 12/);
+    expect(() => readDarwinProcesses(abi)).toThrow(/proc_pidinfo\(PROC_PIDTASKALLINFO\).*(?:ENOMEM|errno 12)/);
     expect(() => readDarwinProcesses(abi)).toThrow(/AGTOP_DARWIN_SCANNER=ps/);
   });
 
-  test("gets identity independent of the process scan and enumerates TCP socket fd rows", () => {
+  test("ABI self-check rejects mismatched short-info identity and kinfo start time", () => {
+    const baseline = fakeNative([], {});
+    const badShort = fakeNative([], {
+      pidInfo(pid, flavor, size) {
+        if (pid === process.pid && flavor === 13) return success(shortInfo({
+          pid: process.pid + 1, ppid: process.ppid, uid: typeof process.getuid === "function" ? process.getuid() : 501,
+        }));
+        return baseline.pidInfo(pid, flavor, size);
+      },
+    });
+    expect(() => readDarwinProcesses(badShort)).toThrow(/PROC_PIDT_SHORTBSDINFO.*AGTOP_DARWIN_SCANNER=ps/);
+    if (typeof process.getuid === "function") {
+      const uid = process.getuid();
+      const badUid = fakeNative([], {
+        pidInfo(pid, flavor, size) {
+          if (pid === process.pid && flavor === 2) return success(taskInfo({ pid, ppid: process.ppid, uid: uid + 1 }));
+          return baseline.pidInfo(pid, flavor, size);
+        },
+      });
+      expect(() => readDarwinProcesses(badUid)).toThrow(/pbi_uid.*AGTOP_DARWIN_SCANNER=ps/);
+    }
+    const badKinfo = fakeNative([], { kinfoProc: pid => kinfo(pid, 1_700_000_001n, 123_456) });
+    expect(() => readDarwinProcesses(badKinfo)).toThrow(/sysctl\(KERN_PROC_PID\).*AGTOP_DARWIN_SCANNER=ps/);
+  });
+
+  test("skips zombies in full and reduced process records", () => {
+    const fullZombie = 81, reducedZombie = 82;
+    const baseline = fakeNative([], {});
+    const native = fakeNative([process.pid, fullZombie, reducedZombie], {
+      pidInfo(pid, flavor, size) {
+        if (pid === fullZombie && flavor === 2) return success(taskInfo({ pid, ppid: 1, status: 5 }));
+        if (pid === reducedZombie && flavor === 2) return { data: Buffer.alloc(size), bytes: 0, errno: 1 };
+        if (pid === reducedZombie && flavor === 13) return success(shortInfo({ pid, ppid: 1, status: 5 }));
+        if (pid === process.pid && flavor === 3) return success(taskInfo({ pid, ppid: process.ppid }).subarray(0, 136));
+        return baseline.pidInfo(pid, flavor, size);
+      },
+    });
+    expect(readDarwinProcesses(native).map(record => record.pid)).toEqual([process.pid]);
+  });
+
+  test("gets identity and grows fd-list buffers past 64 entries while preserving other TCP states", () => {
     const target = 54;
-    const fdList = Buffer.alloc(64 * 8); fdList.writeInt32LE(8, 0); fdList.writeUInt32LE(2, 4);
+    const fallback = fakeNative([], {});
+    const fdCalls: number[] = [];
+    const fdRows = (capacity: number, count: number) => {
+      const data = Buffer.alloc(capacity);
+      for (let i = 0; i < count; i++) {
+        const fd = i + 1, offset = i * 8;
+        data.writeInt32LE(fd, offset);
+        data.writeUInt32LE(fd === 70 ? 2 : 1, offset + 4);
+      }
+      return { data, bytes: count * 8, errno: 0 };
+    };
     const native = fakeNative([], {
-      kinfoProc: pid => kinfo(pid, 1_700_000_099n, 1),
-      pidInfo: (pid, flavor, size) => flavor === 1 ? { data: fdList, bytes: 8, errno: 0 } : { data: Buffer.alloc(size), bytes: 0, errno: 3 },
-      pidFdInfo: () => success(socketInfo({ family: 2, vflag: 1, state: 4 })),
+      kinfoProc: pid => pid === target ? kinfo(pid, 1_700_000_099n, 1) : kinfo(pid),
+      pidInfo(pid, flavor, size) {
+        if (flavor !== 1) return fallback.pidInfo(pid, flavor, size);
+        fdCalls.push(size);
+        if (size === 0) return { data: Buffer.alloc(0), bytes: 84 * 8, errno: 0 };
+        if (size === 84 * 8) return fdRows(size, 84);
+        if (size === 168 * 8) return fdRows(size, 70);
+        return { data: Buffer.alloc(size), bytes: 0, errno: 3 };
+      },
+      pidFdInfo: (_pid, fd) => fd === 70 ? success(socketInfo({ family: 2, vflag: 1, state: 8 })) : { data: Buffer.alloc(0), bytes: 0, errno: 3 },
     });
     expect(darwinIdentity(target, native)).toBe("1700000099000001");
-    expect(darwinTcpRows([target], native)).toEqual([{ pid: target, state: 5, localAddress: "127.0.0.1", localPort: 50_000, remoteAddress: "127.0.0.1", remotePort: 11_434 }]);
+    expect(darwinTcpRows([target], native)).toEqual([{ pid: target, state: 108, localAddress: "127.0.0.1", localPort: 50_000, remoteAddress: "127.0.0.1", remotePort: 11_434 }]);
+    expect(fdCalls).toEqual([0, 84 * 8, 168 * 8]);
+  });
+
+  test("maps fake native Darwin records to RawOsProcess and filters captured environment", async () => {
+    const cwd = Buffer.alloc(2352);
+    Buffer.from("/tmp/darwin-map-test\0").copy(cwd, 152);
+    const args = procArgs("/usr/bin/fake", ["fake", "--flag"], [
+      "AGTOP_JOB_ID=allowed-job", "OPENAI_BASE_URL=https://allowed.example", "PATH=/private/path", "AWS_SECRET_ACCESS_KEY=secret",
+    ]);
+    const baseline = fakeNative([], {});
+    const native = fakeNative([process.pid], {
+      pidPath: () => "/usr/bin/fake",
+      procArgs: () => args,
+      pidInfo(pid, flavor, size) {
+        if (pid === process.pid && flavor === 3) return success(taskInfo({ pid, ppid: process.ppid }).subarray(0, 136));
+        if (pid === process.pid && flavor === 9) return success(cwd);
+        return baseline.pidInfo(pid, flavor, size);
+      },
+    });
+    expect(readDarwinProcesses(native).find(record => record.pid === process.pid)?.env).toEqual([
+      "AGTOP_JOB_ID=allowed-job", "OPENAI_BASE_URL=https://allowed.example",
+    ]);
+    const mapped = await scanDarwinProcesses(native);
+    expect(mapped.find(record => record.pid === process.pid)).toMatchObject({
+      pid: process.pid, ppid: process.ppid, name: "fake", cmdline: "fake --flag", argv: ["fake", "--flag"],
+      startTime: "1700000000123456", cpuSeconds: 0.0000015, memoryMb: 55, cwd: "/tmp/darwin-map-test",
+      envTags: { AGTOP_JOB_ID: "allowed-job", OPENAI_BASE_URL: "https://allowed.example" }, state: "R",
+    });
   });
 });
 
 describe("socket platform guard", () => {
   test.skipIf(process.platform === "darwin")("does not load native Darwin sockets for another platform", async () => {
     const proc: RawOsProcess = { pid: 42, ppid: 1, name: "test", cmdline: "test", startTime: "1", cpuSeconds: 0, cpuPercent: 0, memoryMb: 0 };
-    await collectSocketConnections([proc], "darwin");
+    let darwinRowsReached = false;
+    await collectSocketConnections([proc], "darwin", () => { darwinRowsReached = true; return []; });
+    expect(darwinRowsReached).toBe(false);
     expect(proc).not.toHaveProperty("socketConnections");
     expect(proc).not.toHaveProperty("listeningSockets");
   });
