@@ -987,7 +987,12 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        WorkbenchAction, cancel_confirmation, fallback_harnesses, filtered_agents,
+        matching_harnesses, refreshed_selection, request_stop, shortcut_action,
+        validate_launch_arguments,
+    };
+    use crate::model::Agent;
 
     fn agent(id: &str, harness: &str, branch: &str, pid: u32) -> Agent {
         Agent {
