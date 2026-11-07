@@ -2,7 +2,7 @@
 
 # agtop
 
-Agent-aware process discovery and containment for Windows and Linux. Use it as a terminal monitor, a TypeScript library, or a local HTTP service for an Electron application.
+Agent-aware process discovery and containment for Windows, Linux, and macOS. Use it as a terminal monitor, a TypeScript library, or a local HTTP service for an Electron application.
 
 Recognizes coding agents such as Claude Code, Codex, OpenCode, aider, Goose, Gemini CLI, Qwen Code, Cursor Agent, Antigravity, OpenHands, and Plandex, plus local inference servers such as Lemonade, Ollama, llama.cpp, LM Studio, vLLM, SGLang, LocalAI, KoboldCpp, Tabby, and TGI. Run `agtop harnesses` to list or search the full catalog. Managed jobs can use any executable.
 
@@ -92,11 +92,38 @@ In Electron, use the library from the main process and expose a narrow applicati
 | `win32-job-object` | The process is created inside a named Job Object using `PROC_THREAD_ATTRIBUTE_JOB_LIST`. The manager persists metadata before resuming its initial thread. Descendants remain members even after an intermediate process exits. `TerminateJobObject` terminates the job; closing the last handle also terminates it. Setup failures abort launch. |
 | `linux-cgroup` | A launcher waits on a dedicated pipe while agtop moves it into a new delegated cgroup v2 directory. Only then does it execute the harness. Membership includes nested cgroups; termination writes to `cgroup.kill`. |
 | `linux-env-pgid` | Default Linux fallback: a detached process group plus inherited `AGTOP_*` tags. A pipe-watched helper cleans up tagged processes and process-group members if the manager exits unexpectedly. Termination uses pidfds where supported. |
+| `darwin-env-pgid` | macOS process group plus inherited `AGTOP_*` tags. A pipe-watched helper in its own session cleans up after manager failure. Termination re-checks creation time before each SIGKILL; there is no pidfd, so a microsecond PID-reuse race remains. Not atomic. |
 | `passive-ppid` | Discovery of independently started processes. Termination uses pidfds where supported and creation-time checks before signaling. It cannot provide atomic containment or recover arbitrary descendants that reparented before discovery. |
+
+### Process roles
+
+Each process in a discovered tree has a role, a source, and short evidence; each tree has counts by role. `agtop ps` and `top` show the counts and roles, `agtop roles` lists the catalog, and the library exposes the same fields. Roles are tree-contextual and use this display order:
+
+| Role | Meaning |
+| --- | --- |
+| `agent` | The tree's root agent and its re-exec or shim chain |
+| `subagent` | Another agent harness running under an agent |
+| `mcp-server` | A Model Context Protocol server |
+| `inference-server` | A local model inference server |
+| `dev-server` | A development or preview web server |
+| `language-server` | An LSP or editor intelligence server |
+| `test-runner` | A test framework or one of its workers |
+| `build` | A compiler, bundler, or build system |
+| `package-manager` | A package installer or script runner |
+| `git` | Git and other version control commands or helpers |
+| `browser` | A browser, headless browser, or WebDriver |
+| `shell` | A shell or terminal multiplexer |
+| `tool` | Any other command run in the agent tree |
+
+Classification checks nested job tags, MCP rules, the harness catalog, other command rules, inherited roles, then listening sockets, and finally uses `tool`. Evidence uses catalog rule IDs, PIDs, harness/job IDs, and socket endpoints; it does not expose raw arguments. For example: `socket: listening 127.0.0.1:5173`.
+
+Roles are hints from process names, executable paths, safe command anchors, tree position, tags, and listeners. In-process subagents such as an agent's internal task tool are invisible. Cwd-only harness detection is not applied to nested processes, so `text-generation-webui` is not recognized as a nested inference server. `npm run dev` is classified as `package-manager`; its server child can be a `dev-server`. Docker-launched MCP servers are `tool`. A listening socket indicates a listener, not activity, model execution, or hardware use.
+
+Socket evidence currently formats IPv6 role endpoints without brackets (for example, `::1:3000`), so the host and port can be ambiguous. MCP `listening` values use bracketed IPv6 notation.
 
 ### Recognition
 
-Passive discovery does not require agent cooperation. agtop reads the OS process table (CIM on Windows, `/proc` on Linux) and matches a process by executable basename, interpreter entry point, install path, Python module, or a disambiguating subcommand:
+Passive discovery does not require agent cooperation. agtop reads the OS process table (CIM on Windows, `/proc` on Linux, and libproc on macOS) and matches a process by executable basename, interpreter entry point, install path, Python module, or a disambiguating subcommand:
 
 - `claude`, `codex`, `opencode`, `crush`, `ollama`, `llama-server`, `tritonserver`
 - `node .../@anthropic-ai/claude-code/cli.js`, `node .../@openai/codex/bin/codex.js`
@@ -151,7 +178,7 @@ Daemon-created processes use ignored stdio. Graceful shutdown terminates jobs cr
 
 ## MCP server
 
-`agtop mcp` is a stdio MCP server for agents. It provides **task-scoped containment**: an agent can start a long-lived helper or subagent, inspect it, wait for it, and stop it, but cannot stop jobs created by another session.
+`agtop mcp` is a stdio MCP server for agents. It provides **task-scoped containment**: an agent can start a long-lived helper or subagent, inspect it, wait for it, and stop it, but cannot stop jobs created by another session. `list` includes `roleCounts`; `status` includes each process's role and listening ports only for jobs owned by this MCP session.
 
 | Tool | Purpose |
 | --- | --- |
@@ -175,7 +202,7 @@ Register it globally. OpenCode V2 (`~/.config/opencode/opencode.json`):
     "servers": {
       "agtop": {
         "type": "local",
-        "command": ["C:\\Users\\minisforum-zach\\.t3\\projects\\agent-aware-process-manager\\dist\\agtop.exe", "mcp"],
+        "command": ["C:\\path\\to\\agtop.exe", "mcp"],
         "codemode": false
       }
     }
@@ -187,7 +214,7 @@ Codex CLI (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.agtop]
-command = "C:\\Users\\minisforum-zach\\.t3\\projects\\agent-aware-process-manager\\dist\\agtop.exe"
+command = "C:\\path\\to\\agtop.exe"
 args = ["mcp"]
 ```
 
@@ -210,6 +237,12 @@ bun run compile
 
 `bun run test:mcp` starts the MCP server, exercises the tool surface, verifies scoped kill and cleanup, and checks that closing the session reaps its jobs. `bun run bench:containment` compares a direct spawn with agtop normal exit and cancellation; the baseline intentionally leaks one detached grandchild, and the script kills its own leftovers in a `finally` block.
 
-`compile` produces `dist/agtop.exe` on Windows or `dist/agtop` on Linux, embedding the Bun runtime and Koffi native modules. Build on the target OS. The Windows executable has been tested from a separate directory without `node_modules`. It is larger than a native Rust binary. Keep Koffi as a runtime dependency when distributing the unbundled JavaScript library.
+`compile` produces `dist/agtop.exe` on Windows or `dist/agtop` on Linux and macOS, embedding the Bun runtime and Koffi native modules. Build on the target OS. The Windows executable has been tested from a separate directory without `node_modules`. It is larger than a native Rust binary. Keep Koffi as a runtime dependency when distributing the unbundled JavaScript library.
 
-Tests exercise real disposable process trees, cross-process discovery/termination, normal cleanup, argument preservation, duplicate IDs, daemon authentication, and Windows manager-crash cleanup. Parser and correlation tests cover Linux stat fields, CPU deltas, PID reuse, worktree attribution, backend evidence, and harness recognition (interpreter paths, Python modules, subcommand disambiguation, and false-positive cases). The MCP smoke test and containment benchmark exercise task-scoped ownership, scoped termination, session shutdown, and detached-grandchild cleanup. Set `AGTOP_TEST_CGROUP_ROOT` to run the delegated-cgroup integration test. GitHub Actions runs Windows and Linux checks, including a delegated cgroup test on Linux. Linux runtime behavior has not been locally verified on the Windows development host.
+On macOS, the libproc scanner needs same-user process access. Other users' processes appear with reduced details; TCC restrictions can also reduce access. Processes in an App Sandbox are unsupported. The opt-in `AGTOP_DARWIN_SCANNER=ps` fallback is read-only and loses environment tags, sockets, CPU/RSS, cwd, and precise argv; it cannot launch or stop jobs. In this mode stale-record cleanup keeps every macOS record, so `agtop cleanup --stale` prunes nothing and a crashed job's `--id` remains reserved until its record is removed manually. macOS RSS is resident memory from the kernel. A DYLD environment that prevents loading system libraries can prevent the libproc scanner from starting. macOS state uses `$XDG_STATE_HOME/agtop` or `~/.local/state/agtop`.
+
+The process-group sweep after a group fully exits matches `pgid === rootPid` without checking the root identity again; if PID wraparound reuses that PID as an unrelated group leader during the roughly 400 ms quiet window, that group could be affected. This is unlikely.
+
+In Node `dist` and library use, `NODE_ENV=test` together with `AGTOP_TEST_WATCHDOG_COMMAND` can replace the crash-cleanup watchdog command, including with a test command that disables cleanup. This hook is unavailable in the compiled binary. It is for testing only; never set it in production.
+
+Tests exercise real disposable process trees, cross-process discovery/termination, normal cleanup, argument preservation, duplicate IDs, daemon authentication, and manager-crash cleanup. Parser and correlation tests cover Linux stat fields, CPU deltas, PID reuse, worktree attribution, backend evidence, and harness recognition (interpreter paths, Python modules, subcommand disambiguation, and false-positive cases). The MCP smoke test and containment benchmark exercise task-scoped ownership, scoped termination, session shutdown, and detached-grandchild cleanup. Set `AGTOP_TEST_CGROUP_ROOT` to run the delegated-cgroup integration test. GitHub Actions runs Windows, Linux, and macOS test and desktop legs; all are blocking. macOS behavior is verified in GitHub Actions on Apple silicon and has not been run on the Windows development host.

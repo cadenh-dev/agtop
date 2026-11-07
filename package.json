@@ -1,7 +1,7 @@
 {
   "name": "agtop",
   "version": "0.1.0",
-  "description": "Agent-aware process discovery and OS containment for Windows and Linux",
+  "description": "Agent-aware process discovery and OS containment for Windows, Linux, and macOS",
   "type": "module",
   "private": true,
   "bin": {

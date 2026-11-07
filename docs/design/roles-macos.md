@@ -400,7 +400,7 @@ Spread copies keep scanner objects unmutated. Totals still sum over `procs`. The
 | Surface | Behaviour | Unit |
 |---|---|---|
 | Library | `AgentProcessTree.processes[*].role/roleSource/roleEvidence`, `roleCounts`. `src/index.ts` also exports `ROLE_ORDER`, `ROLE_INFO`, `roleCatalog`, `classifyTreeRoles`. | U1 types, U2 exports |
-| `agtop ps` / `top` text | Tree header gains a 4th line, `  roles: agent 1, shell 2, dev-server 1`, in `ROLE_ORDER` order with zero counts omitted. The process row becomes `  {indent}{*\|-} {pid} {name}  {role}  {cpu}%  {mem} MiB`. The first three header lines are unchanged. | U5 |
+| `agtop ps` / `top` text | Tree header gains a 4th line, `  roles: agent 1, dev-server 1, shell 2`, in `ROLE_ORDER` order with zero counts omitted. The process row becomes `  {indent}{*\|-} {pid} {name}  {role}  {cpu}%  {mem} MiB`. The first three header lines are unchanged. | U5 |
 | `agtop ps --json` | New fields serialize automatically. | — |
 | `agtop roles [QUERY] [--json]` | Lists `roleCatalog()`: role, label, description, definition IDs. Mirrors `agtop harnesses`. | U5 |
 | Daemon `GET /v1/agents` | New fields serialize automatically. No new route. | — |
@@ -597,7 +597,7 @@ Every field below is fixed-width (`uint32_t`, `uint64_t`, `int32_t`, char arrays
 | 312 | insi_laddr (16 bytes. IPv4 address at abs 324.) |
 | 344 | tcpsi_state (int32; LISTEN = 1, ESTABLISHED = 4) |
 
-`KERN_PROCARGS2` buffer: `int32 argc` | exec path (NUL-terminated) | NUL padding | `argc` NUL-terminated argv strings | NUL-terminated env strings, ending at an empty string | apple strings (ignored).
+`KERN_PROCARGS2` buffer: `int32 argc` | exec path (NUL-terminated) | NUL padding | `argc` NUL-terminated argv strings | NUL-terminated env strings, ending at an empty string | apple strings (ignored). An empty `argv[0]` is indistinguishable from variable NUL padding after the exec path, so the parser skips it; the first environment string can then appear in argv/cmdline.
 
 #### 3.2.4 Units and conversions
 
@@ -658,7 +658,7 @@ Termination of other users' processes fails with EPERM from `kill()`. That error
 
 #### 3.2.7 Failure reporting
 
-- Library load failure, `mach_timebase_info` failure, or an **ABI self-check** failure throws `DarwinScannerError`. The self-check runs once: `TASKALLINFO(process.pid)` must return exactly 232 bytes with `pbi_pid === process.pid` and `pbi_ppid === process.ppid`, and `PROC_PIDT_SHORTBSDINFO(process.pid)` must return 64. The error message names the call, the byte count or errno, and the remedy: "Set AGTOP_DARWIN_SCANNER=ps for the reduced read-only scanner." `listAgentTrees()` rejects with it, so the CLI prints it, the daemon returns HTTP 400 with the message, and MCP returns a tool error. This keeps the existing rule that "scanner failures are reported rather than returned as an empty list."
+- Library load failure, `mach_timebase_info` failure, or an **ABI self-check** failure throws `DarwinScannerError`. The self-check runs once: `TASKALLINFO(process.pid)` must return exactly 232 bytes with the expected PID, PPID, and current UID; `KERN_PROC_PID` must report the same start time; and `PROC_PIDT_SHORTBSDINFO(process.pid)` must return 64 bytes with the expected PID, PPID, and UID. The timebase must also have positive integer numerator and denominator. The error message names the call, the byte count or errno, and the remedy: "Set AGTOP_DARWIN_SCANNER=ps for the reduced read-only scanner." `listAgentTrees()` rejects with it, so the CLI prints it, the daemon returns HTTP 400 with the message, and MCP returns a tool error. This keeps the existing rule that "scanner failures are reported rather than returned as an empty list."
 - `proc_listallpids` failure throws. Per-PID failures are skipped. A scan with zero readable processes throws, because agtop can always read itself, so zero means an environment problem.
 - A future macOS that grows a struct makes `proc_pidinfo` fail with ENOMEM for the 232-byte buffer. The self-check catches that, so it surfaces as an error rather than as missing data.
 - Socket enumeration errors are swallowed by `collectSocketConnections`, keeping the existing contract. Their only effect is missing socket evidence.
@@ -697,7 +697,7 @@ for pid in pids:
 
 Address decoding: if `vflag & INI_IPV6`, use 16 bytes and `formatIpv6()` (exported by U1 from `sockets.ts`, producing exactly the strings the Windows parser produces today). Otherwise use the IPv4 bytes at offset +12 and `formatIpv4()`. A dual-stack wildcard listener renders as `0:0:0:0:0:0:0:0`, which `isWildcard()` already accepts.
 
-`collectSocketConnections(processes, platform = process.platform)`. U1 adds the parameter and U3 adds the darwin branch. Rows are fetched **only** when `platform === process.platform`, and the darwin branch passes the scanned PIDs. This stops the mocked Linux and Windows scanner tests in `test/discovery-edge.test.ts` from picking up real macOS sockets. The existing `attributeTcpRows` and the new listener attachment (U1) work unchanged on the macOS rows.
+`collectSocketConnections(processes, platform = process.platform, loadDarwinRows = darwinTcpRows)`. U1 adds the platform and injectable-loader parameters; U3 adds the darwin branch. Rows are fetched **only** when `platform === process.platform`, and the darwin branch passes the scanned PIDs. This stops the mocked Linux and Windows scanner tests in `test/discovery-edge.test.ts` from picking up real macOS sockets. The existing `attributeTcpRows` and the new listener attachment (U1) work unchanged on the macOS rows.
 
 Cost: one `LISTFDS` per same-user process plus one call per socket fd, all synchronous. Other users' processes fail fast with EPERM. As on Linux without root, a root-owned listener is invisible and shows up as "unrecognised listener".
 
@@ -886,7 +886,7 @@ U6 then:
   - Fake-native scans: EPERM gives a reduced record with `argv [execPath]` and real start time; ESRCH is skipped; start-time recheck mismatch is skipped; zero readable records throws; ABI self-check with 0 bytes and errno ENOMEM throws `DarwinScannerError` mentioning `AGTOP_DARWIN_SCANNER`.
   - `collectSocketConnections(rows, "darwin")` while running on another OS does not call native code.
 - `test/darwin-live.test.ts` (U3; `skipIf(process.platform !== "darwin")`):
-  - The scan contains `process.pid` with argv equal to `process.argv`, cwd equal to `fs.realpathSync(process.cwd())`, and `startTime === darwinIdentity(process.pid)`.
+  - A spawned child with a known argv vector is scanned with that argv, cwd equal to its real path, and start time equal to `darwinIdentity(child.pid)`.
   - A spawned child with `AGTOP_JOB_ID=live-x` shows `envTags.AGTOP_JOB_ID`.
   - A busy-loop child's `cpuSeconds` rises by at least 0.2 within 1 s (proves timebase conversion), and RSS is above 1 MiB.
   - A child listening on `127.0.0.1:0` produces a LISTEN row with the right port, and a client connection produces an established row attributed to the client PID.
@@ -978,7 +978,7 @@ Global rules for every unit:
   export function formatIpv4(bytes: Uint8Array): string;           // "a.b.c.d"
   export function formatIpv6(bytes: Uint8Array): string;           // byte-for-byte the current Windows parser output
   export function listenersByPid(rows: TcpRow[]): Map<number, ListeningSocket[]>;
-  export async function collectSocketConnections(processes: RawOsProcess[], platform?: NodeJS.Platform): Promise<void>;
+  export async function collectSocketConnections(processes: RawOsProcess[], platform?: NodeJS.Platform, loadDarwinRows?: typeof darwinTcpRows): Promise<void>;
   ```
 - **Steps:**
   1. `types.ts`: add the §2.3 types. It stays type-only.
@@ -1136,7 +1136,7 @@ Global rules for every unit:
   5. `input.rs`: `cmd-a`/`cmd-c`/`cmd-v`/`cmd-x` on macOS through `cfg`.
   6. `theme.rs`: macOS fonts.
 - **Tests:**
-  - `test/render.test.ts`: a synthetic tree renders the `roles: agent 1, shell 1, dev-server 1` line, rows contain the role between name and CPU, and zero-count roles are omitted.
+  - `test/render.test.ts`: a synthetic tree renders the `roles: agent 1, dev-server 1, shell 1` line in `ROLE_ORDER`, rows contain the role between name and CPU, and zero-count roles are omitted.
   - `test/cli.test.ts`:
     - `TREE_FIELDS` gains `roleCounts` and `PROCESS_FIELDS` gains `role`, `roleSource`, `roleEvidence`.
     - The managed custom job's root has `role === "agent"` and `roleSource === "job"`.
