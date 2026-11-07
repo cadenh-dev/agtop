@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { execFileSync } from "node:child_process";
+import { windowsApi } from "./windows.js";
 import type { JobRecord } from "./types.js";
 
 export function stateDir(): string {
@@ -10,12 +12,75 @@ export function validateJobId(id: string): void {
   if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new Error("Job ID must contain 1–80 letters, digits, underscores, or hyphens.");
 }
 function recordPath(id: string): string { validateJobId(id); return path.join(stateDir(), `${id}.json`); }
-export function reserveJob(id: string): () => void {
+export function reserveJob(id: string, staleCheck = isStaleJob): () => void {
   fs.mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
   const file = recordPath(id);
+  if (fs.existsSync(file)) {
+    try {
+      const record = JSON.parse(fs.readFileSync(file, "utf8")) as JobRecord;
+      if (record.jobId === id && staleCheck(record)) fs.rmSync(file);
+    } catch { /* Preserve unreadable records; a later explicit cleanup can report them. */ }
+  }
   const fd = fs.openSync(file, "wx", 0o600);
   fs.closeSync(fd);
   return () => { fs.rmSync(file, { force: true }); };
+}
+
+export interface ProcessIdentity { pid: number; startTime: string; pgid?: number; tag?: string }
+function processSnapshot(): ProcessIdentity[] {
+  if (process.platform === "win32") {
+    const script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,@{n='Start';e={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds().ToString()}}) | ConvertTo-Json -Compress";
+    const raw = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 20000 });
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) || [];
+    return (Array.isArray(parsed) ? parsed : [parsed]).map(p => ({ pid: Number(p.ProcessId), startTime: String(p.Start) }));
+  }
+  if (process.platform !== "linux") throw new Error("Unsupported platform");
+  return fs.readdirSync("/proc").filter(n => /^\d+$/.test(n)).flatMap(n => {
+    try {
+      const pid = Number(n), stat = fs.readFileSync(`/proc/${n}/stat`, "utf8"), end = stat.lastIndexOf(")"), fields = stat.slice(end + 2).trim().split(/\s+/);
+      const startTime = fields[19], pgid = Number(fields[2]);
+      const env = fs.readFileSync(`/proc/${n}/environ`, "utf8").split("\0").find(v => v.startsWith("AGTOP_JOB_ID="));
+      if (fs.readFileSync(`/proc/${n}/stat`, "utf8").slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19] !== startTime) return [];
+      return [{ pid, startTime, pgid, tag: env?.slice("AGTOP_JOB_ID=".length) }];
+    } catch { return []; }
+  });
+}
+function cgroupPids(dir: string): number[] {
+  const pids = fs.readFileSync(path.join(dir, "cgroup.procs"), "utf8").trim().split(/\s+/).filter(Boolean).map(Number);
+  for (const child of fs.readdirSync(dir, { withFileTypes: true })) if (child.isDirectory()) pids.push(...cgroupPids(path.join(dir, child.name)));
+  return pids;
+}
+/** Unknown or inaccessible containment state is kept as live. */
+export function isStaleJob(record: JobRecord, processes?: ProcessIdentity[], containedPids?: number[]): boolean {
+  try {
+    if (!/^\d+$/.test(record.startTime)) return false;
+    const snapshot = processes ?? processSnapshot();
+    const root = snapshot.find(p => p.pid === record.rootPid);
+    if (root?.startTime === record.startTime) return false;
+    if (root && root.startTime !== record.startTime) { /* PID reuse: the recorded supervisor is dead. */ }
+    else if (!root) { /* Missing supervisor. */ }
+    else return false;
+    if (record.mode === "win32-job-object") {
+      if (process.platform !== "win32" || !record.jobName) return false;
+      const pids = containedPids ?? windowsApi().withJob(record.jobName, 4, h => windowsApi().pids(h));
+      return pids !== undefined && pids.length === 0;
+    }
+    if (record.mode === "linux-cgroup") {
+      if (process.platform !== "linux" || !record.cgroupPath) return false;
+      if (containedPids) return containedPids.length === 0;
+      try { return cgroupPids(record.cgroupPath).length === 0; }
+      catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; throw e; }
+    }
+    if (record.mode === "linux-env-pgid" && process.platform === "linux") {
+      return !snapshot.some(p => p.tag === record.jobId || p.pgid === record.rootPid);
+    }
+    return false;
+  } catch { return false; }
+}
+export function pruneStaleJobs(dryRun = false, staleCheck = isStaleJob): string[] {
+  const stale = readJobs().filter(job => staleCheck(job)).map(job => job.jobId);
+  if (!dryRun) for (const id of stale) fs.rmSync(recordPath(id), { force: true });
+  return stale;
 }
 export function writeJob(record: JobRecord): void {
   const file = recordPath(record.jobId);
