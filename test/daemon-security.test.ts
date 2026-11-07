@@ -241,6 +241,19 @@ test("browser origins are rejected with a valid bearer token", async () => {
   } finally { await daemon.close(); }
 }, 15000);
 
+test("accelerator snapshot route uses the daemon auth and origin boundary", async () => {
+  const daemon = await openDaemon();
+  try {
+    expect((await call(daemon.port, { path: "/v1/accelerators" })).status).toBe(401);
+    const headers = bearer(daemon.token);
+    const browser = await call(daemon.port, { path: "/v1/accelerators", headers: { ...headers, origin: "http://evil.example" } });
+    expect(browser.status).toBe(401);
+    const response = await call(daemon.port, { path: "/v1/accelerators", headers });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ devices: expect.any(Array), status: expect.any(Array), sampledAt: expect.any(Number) });
+  } finally { await daemon.close(); }
+}, 15000);
+
 test("OPTIONS preflight grants no Access-Control-Allow-* headers", async () => {
   const daemon = await openDaemon();
   try {

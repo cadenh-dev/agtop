@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { listAgentTrees, spawnContainedAgent, killAgentTree } from "./manager.js";
+import { getAcceleratorSnapshot } from "./accelerators.js";
 import { probeLemonade } from "./backend.js";
 import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
@@ -11,13 +12,14 @@ import { ROLE_ORDER, roleCatalog } from "./roles.js";
 import { startMcpServer } from "./mcp.js";
 import { pruneStaleJobs } from "./registry.js";
 import { WATCHDOG_ARG, runWatchdog } from "./watchdog.js";
-import type { AgentProcessTree, HarnessType, SpawnAgentOptions } from "./types.js";
+import type { AcceleratorSnapshot, AgentProcessTree, HarnessType, SpawnAgentOptions } from "./types.js";
 
 const help = `agtop — agent-aware process manager
 
   agtop                       Live view (or ps when output is redirected)
   agtop top [--interval 2000]  Live process trees; q or Ctrl+C to quit
   agtop ps [--json]            Discover agents and sample CPU usage
+  agtop gpu [--json]           Show GPU/NPU devices and measurement status (alias: accelerators)
   agtop run [options] -- COMMAND [ARGS...]
   agtop kill JOB_ID_OR_PID     Force-stop an agent tree
   agtop cleanup [--stale] [--dry-run] [--json]  Stop jobs or prune stale records
@@ -38,21 +40,38 @@ macOS uses a process group with inherited tags; there is no atomic containment.
 Passive tree termination and process-group fallback are best effort.
 `;
 function clean(s: string) { return s.replace(/[\x00-\x1f\x7f-\x9f]/g, " "); }
-export function renderTrees(trees: AgentProcessTree[]): string {
-  if (!trees.length) return "No active AI agent harnesses or local engines detected.\n";
+export function renderTrees(trees: AgentProcessTree[], snapshot: AcceleratorSnapshot | undefined = getAcceleratorSnapshot()): string {
+  const unavailable = snapshot?.status.filter(status => !status.available) ?? [];
+  const footer = unavailable.length
+    ? `\nAccelerators: ${unavailable.map(status => `${status.kind}: unavailable${status.message ? ` (${status.message})` : status.reason ? ` (${status.reason})` : ""}`).join("; ")}\n`
+    : "";
+  if (!trees.length) return "No active AI agent harnesses or local engines detected.\n" + footer;
   return trees.map(t => {
     const git = t.git ? `${path.basename(t.git.repoRoot)} [${t.git.branch}]` : "worktree unknown";
-    const rows = [`${t.harness}  ${t.jobId}  PID ${t.rootPid}`, `  ${t.totalCpuPercent.toFixed(1)}% CPU  ${t.totalMemoryMb.toFixed(1)} MiB  ${t.backend}  ${t.containmentMode}`, `  ${t.userOrPeer}  ${git}`];
+    const totals = [t.gpuPercent !== undefined ? `GPU ${t.gpuPercent.toFixed(1)}%` : "", t.npuPercent !== undefined ? `NPU ${t.npuPercent.toFixed(1)}%` : "", t.gpuMemoryMb !== undefined ? `GPU mem ${t.gpuMemoryMb.toFixed(1)} MiB` : ""].filter(Boolean);
+    const rows = [`${t.harness}  ${t.jobId}  PID ${t.rootPid}${totals.length ? `  ${totals.join("  ")}` : ""}`, `  ${t.totalCpuPercent.toFixed(1)}% CPU  ${t.totalMemoryMb.toFixed(1)} MiB  ${t.backend}  ${t.containmentMode}`, `  ${t.userOrPeer}  ${git}`];
     const roleSummary = ROLE_ORDER.filter(role => (t.roleCounts[role] ?? 0) > 0).map(role => `${role} ${t.roleCounts[role]}`).join(", ");
     rows.push(`  roles: ${roleSummary}`);
     const ids = new Map(t.processes.map(p => [p.pid, p]));
     for (const p of t.processes) {
       let depth = 0, parent = p.ppid; const seen = new Set<number>([p.pid]);
       while (ids.has(parent) && !seen.has(parent)) { seen.add(parent); depth++; parent = ids.get(parent)!.ppid; }
-      rows.push(`  ${"  ".repeat(Math.min(depth, 8))}${p.pid === t.rootPid ? "*" : "-"} ${p.pid} ${p.name}  ${p.role}  ${p.cpuPercent.toFixed(1)}%  ${p.memoryMb.toFixed(1)} MiB`);
+      const accel = (p.accelerators ?? []).filter(a => a.utilizationPercent !== undefined).map(a => `${a.kind} ${a.utilizationPercent!.toFixed(1)}%`);
+      rows.push(`  ${"  ".repeat(Math.min(depth, 8))}${p.pid === t.rootPid ? "*" : "-"} ${p.pid} ${p.name}  ${p.role}  ${p.cpuPercent.toFixed(1)}%  ${p.memoryMb.toFixed(1)} MiB${accel.length ? `  ${accel.join("  ")}` : ""}`);
     }
     return rows.map(clean).join("\n");
-  }).join("\n\n") + "\n";
+  }).join("\n\n") + "\n" + footer;
+}
+
+export function renderAccelerators(snapshot: ReturnType<typeof getAcceleratorSnapshot>): string {
+  const value = snapshot ?? { devices: [], status: [], sampledAt: 0 };
+  const devices = value.devices.length
+    ? value.devices.map(device => `${device.id}  ${device.kind}  ${device.name ?? "unknown"}  ${device.vendor ?? "unknown"}  ${device.utilizationPercent === undefined ? "" : `${device.utilizationPercent.toFixed(1)}%`}`.trimEnd())
+    : ["No accelerator devices detected."];
+  const statuses = value.status.length
+    ? value.status.map(status => `${status.source}  ${status.kind}  ${status.available ? "available" : `unavailable${status.reason ? ` (${status.reason})` : ""}`}  ${status.message ?? ""}`.trimEnd())
+    : ["No accelerator status available."];
+  return `Devices\nID  KIND  NAME  VENDOR  UTIL%\n${devices.join("\n")}\n\nStatus\nSOURCE  KIND  STATUS  MESSAGE\n${statuses.join("\n")}\n`;
 }
 function value(args: string[], index: number): string {
   const v = args[index + 1]; if (!v || v.startsWith("--")) throw new Error(`Missing value for ${args[index]}`); return v;
@@ -95,6 +114,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (rest.some(a => a !== "--json")) throw new Error("Usage: agtop ps [--json]");
     await listAgentTrees(); await delay(200); const trees = await listAgentTrees();
     console.log(rest.includes("--json") ? JSON.stringify(trees, null, 2) : renderTrees(trees)); return;
+  }
+  if (command === "gpu" || command === "accelerators") {
+    if (rest.some(a => a !== "--json") || new Set(rest).size !== rest.length) throw new Error(`Usage: agtop ${command} [--json]`);
+    await listAgentTrees();
+    const snapshot = getAcceleratorSnapshot();
+    console.log(rest.includes("--json") ? JSON.stringify(snapshot ?? { devices: [], status: [], sampledAt: 0 }, null, 2) : renderAccelerators(snapshot)); return;
   }
   if (command === "top") {
     if (rest.length && (rest.length !== 2 || rest[0] !== "--interval")) throw new Error("Usage: agtop top [--interval 2000]");

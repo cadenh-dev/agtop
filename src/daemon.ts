@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { listAgentTrees, killAgentTree, spawnContainedAgent } from "./manager.js";
+import { getAcceleratorSnapshot } from "./accelerators.js";
 import { probeLemonade } from "./backend.js";
 import { harnessCatalog } from "./harnesses.js";
 import { stateDir } from "./registry.js";
@@ -33,6 +34,11 @@ export async function startDaemon(options: { port?: number; token?: string } = {
     try {
       if (req.method === "GET" && req.url === "/v1/harnesses") { reply(200, harnessCatalog()); return; }
       if (req.method === "GET" && req.url === "/v1/agents") { reply(200, await listAgentTrees()); return; }
+      if (req.method === "GET" && req.url === "/v1/accelerators") {
+        let snapshot = getAcceleratorSnapshot();
+        if (!snapshot) { await listAgentTrees(); snapshot = getAcceleratorSnapshot(); }
+        reply(200, snapshot ?? { devices: [], status: [], sampledAt: performance.now() }); return;
+      }
       if (req.method === "GET" && req.url === "/v1/lemonade") { reply(200, await probeLemonade()); return; }
       if (req.method === "POST" && req.url === "/v1/agents") {
         const data = await body(req);

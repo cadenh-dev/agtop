@@ -109,7 +109,7 @@ describe("agtop CLI subprocess", () => {
   test("--help exits 0 and lists commands", async () => {
     const { code, stdout } = await runCli(["--help"]);
     expect(code).toBe(0);
-    for (const snippet of ["agtop ps", "agtop run", "agtop kill", "agtop harnesses", "agtop roles", "agtop lemonade", "agtop daemon", "agtop mcp", "agtop ui", "macOS uses a process group"]) {
+    for (const snippet of ["agtop ps", "agtop gpu", "alias: accelerators", "agtop run", "agtop kill", "agtop harnesses", "agtop roles", "agtop lemonade", "agtop daemon", "agtop mcp", "agtop ui", "macOS uses a process group"]) {
       expect(stdout).toContain(snippet);
     }
   });
@@ -149,6 +149,13 @@ describe("agtop CLI subprocess", () => {
       expect(Array.isArray(processes)).toBe(true);
       expect(processes.length).toBeGreaterThan(0);
       for (const key of PROCESS_FIELDS) expect(processes[0]).toHaveProperty(key);
+      for (const key of ["gpuPercent", "npuPercent", "gpuMemoryMb"]) {
+        if (key in tree!) expect(typeof tree![key]).toBe("number");
+      }
+      for (const process of processes) {
+        if ("accelerators" in process) expect(Array.isArray(process.accelerators)).toBe(true);
+        expect(Object.keys(process).filter(key => !PROCESS_FIELDS.includes(key as typeof PROCESS_FIELDS[number]) && key !== "accelerators")).toEqual([]);
+      }
       expect(tree!.roleCounts).toBeDefined();
       expect(processes.find(p => p.pid === tree!.rootPid)).toMatchObject({ role: "agent", roleSource: "job" });
     } finally {
@@ -156,6 +163,15 @@ describe("agtop CLI subprocess", () => {
       await Promise.race([new Promise<void>(r => supervisor.once("exit", () => r())), delay(5000)]);
       if (supervisor.exitCode === null) supervisor.kill("SIGKILL");
     }
+  }, 60_000);
+
+  test("gpu --json prints devices and status", async () => {
+    const { code, stdout } = await runCli(["gpu", "--json"], { timeout: 60_000 });
+    expect(code).toBe(0);
+    const snapshot = JSON.parse(stdout) as { devices: unknown[]; status: unknown[]; sampledAt: number };
+    expect(Array.isArray(snapshot.devices)).toBe(true);
+    expect(Array.isArray(snapshot.status)).toBe(true);
+    expect(typeof snapshot.sampledAt).toBe("number");
   }, 60_000);
 
   test("harnesses codex --json filters the catalog", async () => {

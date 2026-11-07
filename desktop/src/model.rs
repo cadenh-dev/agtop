@@ -55,6 +55,55 @@ pub struct Process {
     pub role_source: String,
     #[serde(default)]
     pub role_evidence: String,
+    #[serde(default)]
+    pub accelerators: Vec<AcceleratorUsage>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceleratorUsage {
+    pub device_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub utilization_percent: Option<f64>,
+    #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceleratorDevice {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub utilization_percent: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceleratorStatus {
+    pub source: String,
+    pub kind: String,
+    pub available: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceleratorSnapshot {
+    #[serde(default)]
+    pub devices: Vec<AcceleratorDevice>,
+    #[serde(default)]
+    pub status: Vec<AcceleratorStatus>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -78,6 +127,12 @@ pub struct Agent {
     pub containment_mode: String,
     pub total_cpu_percent: f64,
     pub total_memory_mb: f64,
+    #[serde(default)]
+    pub gpu_percent: Option<f64>,
+    #[serde(default)]
+    pub npu_percent: Option<f64>,
+    #[serde(default)]
+    pub gpu_memory_mb: Option<f64>,
     pub processes: Vec<Process>,
     #[serde(default)]
     pub role_counts: BTreeMap<String, u32>,
@@ -352,6 +407,10 @@ mod tests {
         .unwrap();
         assert!(legacy.role_counts.is_empty());
         assert_eq!(legacy.processes[0].role, "");
+        assert!(legacy.processes[0].accelerators.is_empty());
+        assert_eq!(legacy.gpu_percent, None);
+        assert_eq!(legacy.npu_percent, None);
+        assert_eq!(legacy.gpu_memory_mb, None);
         assert_eq!(ROLE_ORDER.len(), 13);
     }
 
