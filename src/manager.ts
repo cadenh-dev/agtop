@@ -5,16 +5,17 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Writable } from "node:stream";
-import { CpuSampler, harnesses, isLocalHarness, linuxIdentity, scanLinuxProcesses, scanWindowsProcesses } from "./discovery.js";
+import { CpuSampler, harnesses, isLocalHarness } from "./discovery.js";
 import { backendFor, lemonadeBase } from "./backend.js";
 import { readJobs, reserveJob, validateJobId, writeJob } from "./registry.js";
 import { correlateTrees } from "./trees.js";
 import { windowsApi } from "./windows.js";
-import { signalLinuxProcess } from "./linux.js";
+import { assertSupportedPlatform, isPgidMode, posixOps, scanProcesses } from "./platform.js";
+import { launchWatchdog, watchdogCommand } from "./watchdog.js";
 import type { AgentProcessTree, JobRecord, KillResult, ManagedAgent, RawOsProcess, SpawnAgentOptions } from "./types.js";
 
 const sampler = new CpuSampler();
-function supported() { if (!["win32", "linux"].includes(process.platform)) throw new Error("agtop supports Windows and Linux."); }
+function supported() { assertSupportedPlatform(); }
 function cgroupMembers(dir: string): number[] {
   const pids = fs.readFileSync(path.join(dir, "cgroup.procs"), "utf8").trim().split(/\s+/).map(Number).filter(n => n > 0);
   for (const child of fs.readdirSync(dir, { withFileTypes: true })) if (child.isDirectory()) pids.push(...cgroupMembers(path.join(dir, child.name)));
@@ -25,7 +26,7 @@ function members(job: JobRecord, processes: RawOsProcess[]): number[] {
   if (job.mode === "linux-cgroup" && job.cgroupPath) {
     try { return cgroupMembers(job.cgroupPath); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; throw e; }
   }
-  if (job.mode === "linux-env-pgid") {
+  if (isPgidMode(job.mode)) {
     const root = processes.find(p => p.pid === job.rootPid && p.startTime === job.startTime && p.pgid === job.rootPid);
     return processes.filter(p => p.envTags?.AGTOP_JOB_ID === job.jobId || (!!root && p.pgid === job.rootPid)).map(p => p.pid);
   }
@@ -35,7 +36,7 @@ let scanning: Promise<AgentProcessTree[]> | undefined;
 export function listAgentTrees(): Promise<AgentProcessTree[]> {
   supported();
   return scanning ??= (async () => {
-    const processes = sampler.sample(await (process.platform === "win32" ? scanWindowsProcesses() : scanLinuxProcesses()));
+    const processes = sampler.sample(await scanProcesses());
     const jobs = readJobs();
     return correlateTrees(processes, jobs, new Map(jobs.map(job => [job.jobId, members(job, processes)])));
   })().finally(() => { scanning = undefined; });
@@ -49,6 +50,8 @@ export async function killAgentTree(id: string, options: { expectedStartTime?: s
   if (target.processes.some(p => p.pid === process.pid)) throw new Error("Refusing to terminate a tree containing this manager.");
   const result: KillResult = { killedPids: [], failedPids: [], errors: [] };
   const job = readJobs().find(j => j.jobId === target.jobId);
+  const posix = process.platform === "win32" ? undefined : posixOps();
+  posix?.assertWritable();
   let atomic = false;
   try {
     if (job?.mode === "win32-job-object" && job.jobName) {
@@ -63,13 +66,13 @@ export async function killAgentTree(id: string, options: { expectedStartTime?: s
     for (const p of [...target.processes].reverse()) {
       try {
         if (process.platform === "win32") { if (windowsApi().killProcess(p)) result.killedPids.push(p.pid); else result.failedPids.push(p.pid); }
-        else await signalLinuxProcess(p.pid, p.startTime, 9);
+        else await posix!.signal(p.pid, p.startTime, 9);
       } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") result.errors.push(`PID ${p.pid}: ${String(e)}`); }
     }
   }
   // Report observed exits, never turn a failed termination call into a success count.
   for (let attempt = 0; attempt < 20; attempt++) {
-    const remaining = process.platform === "win32" ? await scanWindowsProcesses() : await scanLinuxProcesses();
+    const remaining = await scanProcesses();
     const alive = new Set(remaining.map(p => `${p.pid}:${p.startTime}`));
     result.killedPids = target.processes.filter(p => !alive.has(`${p.pid}:${p.startTime}`)).map(p => p.pid);
     result.failedPids = target.processes.filter(p => alive.has(`${p.pid}:${p.startTime}`)).map(p => p.pid);
@@ -96,7 +99,7 @@ function executable(command: string, cwd: string, env: Record<string, string>): 
 }
 export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<ManagedAgent> {
   supported();
-  if (process.platform === "win32" && opts?.cgroupRoot) throw new Error("cgroupRoot is supported only on Linux.");
+  if (process.platform !== "linux" && opts?.cgroupRoot) throw new Error("cgroupRoot is supported only on Linux.");
   if (!opts || !harnesses.includes(opts.harness) || typeof opts.command !== "string" || !opts.command || (opts.args !== undefined && (!Array.isArray(opts.args) || opts.args.some(a => typeof a !== "string")))) throw new Error("Provide a valid harness, command, and string argument array.");
   for (const key of ["cwd", "userOrPeer", "lemonadeUrl", "cgroupRoot"] as const) {
     if (opts[key] !== undefined && typeof opts[key] !== "string") throw new Error(`${key} must be a string.`);
@@ -125,10 +128,12 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
   const args = opts.args || [];
   if ([opts.command, ...args, cwd, env.AGTOP_PEER].some(v => v.includes("\0"))) throw new Error("Arguments cannot contain NUL characters.");
   const command = executable(opts.command, cwd, env);
+  const posix = process.platform === "win32" ? undefined : posixOps();
+  posix?.assertWritable();
   const release = reserveJob(id);
   const record: JobRecord = { version: 1, jobId: id, rootPid: 0, startTime: "", harness: opts.harness, peer: env.AGTOP_PEER, cwd,
     backend: backendFor([{ envTags: env } as RawOsProcess], isLocalHarness(opts.harness)).backend,
-    mode: process.platform === "win32" ? "win32-job-object" : "linux-env-pgid", createdAt: new Date().toISOString() };
+    mode: process.platform === "win32" ? "win32-job-object" : posix!.fallbackMode, createdAt: new Date().toISOString() };
   if (process.platform === "win32") {
     let native: ReturnType<ReturnType<typeof windowsApi>["launch"]> | undefined;
     try {
@@ -149,8 +154,9 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
   }
   let child: ReturnType<typeof spawn> | undefined;
   let watchdog: ReturnType<typeof spawn> | undefined;
+  let watchdogPipe: Writable | undefined;
   try {
-    const cgroupRoot = opts.cgroupRoot ?? process.env.AGTOP_CGROUP_ROOT;
+    const cgroupRoot = process.platform === "linux" ? opts.cgroupRoot ?? process.env.AGTOP_CGROUP_ROOT : undefined;
     if (cgroupRoot) {
       const root = fs.realpathSync(cgroupRoot);
       if (!fs.existsSync(path.join(root, "cgroup.controllers"))) throw new Error("cgroupRoot must be a delegated cgroup v2 directory.");
@@ -168,31 +174,30 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
     // Bun can miss the spawn event; a defined pid already proves the process was created.
     if (launched.pid === undefined) await new Promise<void>((_, reject) => launched.once("error", reject));
     record.rootPid = launched.pid!;
-    record.startTime = await linuxIdentity(record.rootPid) || "";
+    record.startTime = await posix!.identity(record.rootPid) || "";
     if (!record.startTime) throw new Error("Launch process exited before containment setup.");
     if (record.cgroupPath) fs.writeFileSync(path.join(record.cgroupPath, "cgroup.procs"), String(record.rootPid));
     writeJob(record);
     if (!record.cgroupPath) {
-      const watchdogPath = new URL("./linux-watchdog.ts", import.meta.url).pathname;
-      const watchdogEnv = { ...process.env };
-      delete watchdogEnv.AGTOP_JOB_ID; delete watchdogEnv.AGTOP_HARNESS; delete watchdogEnv.AGTOP_PEER; delete watchdogEnv.AGTOP_WORKTREE;
-      watchdog = spawn(process.execPath, [watchdogPath, String(record.rootPid), id], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: watchdogEnv });
+      const started = await launchWatchdog(watchdogCommand(record.rootPid, id));
+      watchdog = started.child;
+      watchdogPipe = started.pipe;
     }
     (launched.stdio[3] as Writable).end("go\n");
     const exited = rawExit.finally(async () => {
       try {
         if (record.cgroupPath) fs.writeFileSync(path.join(record.cgroupPath, "cgroup.kill"), "1");
         else {
-          const remaining = await scanLinuxProcesses();
+          const remaining = await posix!.scan();
           for (const p of remaining.filter(p => p.envTags?.AGTOP_JOB_ID === id || p.pgid === record.rootPid)) {
-            try { await signalLinuxProcess(p.pid, p.startTime, 9); } catch {}
+            try { await posix!.signal(p.pid, p.startTime, 9); } catch {}
           }
         }
-      } finally { (watchdog?.stdio[3] as Writable | null)?.end(); release(); if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {} }
+      } finally { watchdogPipe?.end(); release(); if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {} }
     });
     return { jobId: id, pid: record.rootPid, containmentMode: record.mode, exited, terminate: () => killAgentTree(id) };
   } catch (e) {
-    child?.kill("SIGKILL"); (watchdog?.stdio[3] as Writable | null)?.end(); watchdog?.kill("SIGKILL"); release();
+    child?.kill("SIGKILL"); watchdogPipe?.end(); watchdog?.kill("SIGKILL"); release();
     if (record.cgroupPath) try { fs.rmdirSync(record.cgroupPath); } catch {}
     throw e;
   }

@@ -12,7 +12,7 @@ afterEach(() => { for (const name of fs.readdirSync(state)) fs.rmSync(path.join(
 afterAll(() => { if (oldState === undefined) delete process.env.AGTOP_STATE_DIR; else process.env.AGTOP_STATE_DIR = oldState; fs.rmSync(state, { recursive: true, force: true }); });
 
 function record(jobId: string, rootPid = 900_001): JobRecord {
-  return { version: 1, jobId, rootPid, startTime: "100", harness: "custom", peer: "test", cwd: os.tmpdir(), backend: "unknown", mode: process.platform === "win32" ? "win32-job-object" : "linux-env-pgid", ...(process.platform === "win32" ? { jobName: `missing-${jobId}` } : {}), createdAt: new Date().toISOString() };
+  return { version: 1, jobId, rootPid, startTime: "100", harness: "custom", peer: "test", cwd: os.tmpdir(), backend: "unknown", mode: process.platform === "win32" ? "win32-job-object" : process.platform === "darwin" ? "darwin-env-pgid" : "linux-env-pgid", ...(process.platform === "win32" ? { jobName: `missing-${jobId}` } : {}), createdAt: new Date().toISOString() };
 }
 function stale(job: JobRecord, processes: Parameters<typeof isStaleJob>[1], members: number[] = []) { return isStaleJob(job, processes, members); }
 

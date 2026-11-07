@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { execFileSync } from "node:child_process";
 import { windowsApi } from "./windows.js";
+import { darwinIdentities } from "./darwin.js";
 import type { JobRecord } from "./types.js";
 
 export function stateDir(): string {
@@ -34,6 +35,7 @@ function processSnapshot(): ProcessIdentity[] {
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) || [];
     return (Array.isArray(parsed) ? parsed : [parsed]).map(p => ({ pid: Number(p.ProcessId), startTime: String(p.Start) }));
   }
+  if (process.platform === "darwin") return darwinIdentities();
   if (process.platform !== "linux") throw new Error("Unsupported platform");
   return fs.readdirSync("/proc").filter(n => /^\d+$/.test(n)).flatMap(n => {
     try {
@@ -71,7 +73,8 @@ export function isStaleJob(record: JobRecord, processes?: ProcessIdentity[], con
       try { return cgroupPids(record.cgroupPath).length === 0; }
       catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; throw e; }
     }
-    if (record.mode === "linux-env-pgid" && process.platform === "linux") {
+    if ((record.mode === "linux-env-pgid" && process.platform === "linux") ||
+      (record.mode === "darwin-env-pgid" && process.platform === "darwin")) {
       return !snapshot.some(p => p.tag === record.jobId || p.pgid === record.rootPid);
     }
     return false;

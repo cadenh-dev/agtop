@@ -46,7 +46,7 @@ test("cross-process ps and kill find descendants after their intermediate parent
     expect(tree).toBeDefined();
     expect(tree.processes.map((p: any) => p.pid)).toContain(descendant);
     expect(tree.processes.map((p: any) => p.pid)).toContain(agent.pid);
-    expect(tree.containmentMode).toBe(process.platform === "win32" ? "win32-job-object" : "linux-env-pgid");
+    expect(tree.containmentMode).toBe(({ win32: "win32-job-object", linux: "linux-env-pgid", darwin: "darwin-env-pgid" } as Record<string, string>)[process.platform]);
     const killed = await exec(process.execPath, [cli, "kill", agent.jobId], { windowsHide: true, timeout: 20000 });
     const result = JSON.parse(killed.stdout);
     expect(result.failedPids).toEqual([]); expect(result.errors).toEqual([]);

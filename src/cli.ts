@@ -9,6 +9,7 @@ import { launchDesktop } from "./desktop.js";
 import { searchHarnesses } from "./harnesses.js";
 import { startMcpServer } from "./mcp.js";
 import { pruneStaleJobs } from "./registry.js";
+import { WATCHDOG_ARG, runWatchdog } from "./watchdog.js";
 import type { AgentProcessTree, HarnessType, SpawnAgentOptions } from "./types.js";
 
 const help = `agtop — agent-aware process manager
@@ -78,6 +79,7 @@ async function top(interval: number) {
   }
 }
 export async function main(args = process.argv.slice(2)): Promise<void> {
+  if (args[0] === WATCHDOG_ARG) { process.exitCode = await runWatchdog(args.slice(1)); return; }
   const [command = process.stdout.isTTY ? "top" : "ps", ...rest] = args;
   if (["help", "--help", "-h"].includes(command)) { console.log(help); return; }
   if (command === "ui") {
