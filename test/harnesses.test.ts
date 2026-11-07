@@ -3,6 +3,7 @@ import {
   HARNESS_DEFINITIONS,
   detectHarness,
   harnessCatalog,
+  searchHarnesses,
   harnessKind,
   harnessLabel,
   type HarnessDefinition,
@@ -10,14 +11,6 @@ import {
   type HarnessRule,
 } from "../src/harnesses.js";
 import type { HarnessType } from "../src/types.js";
-
-/** Mirrors `agtop harnesses [QUERY]` filtering in src/cli.ts and src/mcp.ts. */
-function catalogSearch(query: string): Array<{ id: HarnessType; label: string; kind: HarnessKind }> {
-  const q = query.toLowerCase().trim();
-  return harnessCatalog().filter(item =>
-    `${item.id} ${item.label} ${item.kind}`.toLowerCase().includes(q),
-  );
-}
 
 type DetectInput = Parameters<typeof detectHarness>[0];
 
@@ -106,7 +99,7 @@ describe("harness catalog metadata", () => {
     ["custom", ["custom"]],
     ["", harnessCatalog().map(h => h.id)],
   ] as const)("catalogSearch(%j) returns expected ids", (query, expectedIds) => {
-    const ids = catalogSearch(query).map(h => h.id).sort();
+    const ids = searchHarnesses(query).map(h => h.id).sort();
     expect(ids).toEqual([...expectedIds].sort());
   });
 
@@ -116,7 +109,7 @@ describe("harness catalog metadata", () => {
       .filter(h => `${h.id} ${h.label} ${h.kind}`.toLowerCase().includes(q))
       .map(h => h.id)
       .sort();
-    expect(catalogSearch(q).map(h => h.id).sort()).toEqual(expected);
+    expect(searchHarnesses(q).map(h => h.id).sort()).toEqual(expected);
     expect(expected).toContain("lemonade-server");
     expect(expected.every(id => harnessKind(id) === "server" || id.includes("server"))).toBe(true);
   });
