@@ -384,6 +384,52 @@ test("Codex is catalogued and inline code is not command evidence", () => {
 });
 
 describe("review regressions", () => {
+  const round3Cases: Array<[string, string[], ProcessRole]> = [
+    ["python stdin codex is not a program anchor", ["python3", "-", "codex"], "tool"],
+    ["node stdin codex is not a program anchor", ["node", "-", "codex"], "tool"],
+    ["python stdin ollama path is not an anchor", ["python3", "-", "/x/ollama"], "tool"],
+    ["python stdin MCP path is not an anchor", ["python3", "-", "/x/node_modules/@modelcontextprotocol/server-x/index.js"], "tool"],
+    ["python stdin Codex prompt is not an anchor", ["python3", "-", "fix the bug in /x/node_modules/@openai/codex/bin/codex.js"], "tool"],
+    ["uv directory value is skipped", ["uv", "--directory", "/work/aider", "run", "pytest"], "test-runner"],
+    ["uv project value is skipped", ["uv", "run", "--project", "/work/aider", "pytest"], "test-runner"],
+    ["uv run directory value is skipped", ["uv", "run", "--directory", "/work/ollama", "python", "x.py"], "tool"],
+    ["uv requirements value is skipped", ["uv", "run", "--with-requirements", "/x/ollama", "x.py"], "tool"],
+    ["uv index value is skipped", ["uv", "--index", "/x/ollama", "run", "pytest"], "test-runner"],
+    ["uv index URL value is skipped", ["uv", "run", "--index-url", "/x/ollama", "pytest"], "test-runner"],
+    ["uv extra index value is skipped", ["uv", "run", "--extra-index-url", "/x/ollama", "pytest"], "test-runner"],
+    ["uv group value is skipped", ["uv", "run", "--group", "/x/ollama", "pytest"], "test-runner"],
+    ["uv extra value is skipped", ["uv", "run", "--extra", "/x/ollama", "pytest"], "test-runner"],
+    ["uv editable value is skipped", ["uv", "run", "--with-editable", "/x/ollama", "pytest"], "test-runner"],
+    ["pipx spec value is skipped", ["pipx", "--spec", "codex", "run", "test.js"], "tool"],
+    ["Node title value is skipped", ["node", "--title", "codex", "app.js"], "tool"],
+    ["Node watch path value is skipped", ["node", "--watch-path", "/x/node_modules/@openai/codex", "app.js"], "tool"],
+    ["Node warning value is skipped", ["node", "--disable-warning", "ExperimentalWarning", "/x/node_modules/@anthropic-ai/claude-code/cli.js"], "subagent"],
+    ["Node input type value is skipped", ["node", "--input-type", "codex", "app.js"], "tool"],
+    ["Node test reporter value is skipped", ["node", "--test-reporter", "codex", "app.js"], "tool"],
+    ["Node test reporter destination value is skipped", ["node", "--test-reporter-destination", "/x/node_modules/@openai/codex", "app.js"], "tool"],
+    ["Node redirect warning value is skipped", ["node", "--redirect-warnings", "codex", "app.js"], "tool"],
+    ["Node inspect port value is skipped", ["node", "--inspect-port", "codex", "app.js"], "tool"],
+    ["uv equals form is self contained", ["uv", "--directory=/work/aider", "run", "pytest"], "test-runner"],
+    ["Node equals form is self contained", ["node", "--title=codex", "app.js"], "tool"],
+    ["inline python W value keeps script anchor", ["python3", "-bWerror", "tools/scan.py", "/x/ollama"], "tool"],
+    ["inline python W value keeps script anchor for Codex", ["python3", "-BWignore", "tools/scan.py", "/x/node_modules/@openai/codex/bin/codex.js"], "tool"],
+    ["inline python X value keeps script anchor", ["python3", "-bXimporttime", "tools/scan.py", "codex"], "tool"],
+    ["combined python W consumes separate value", ["python", "-bW", "error", "-m", "pytest"], "test-runner"],
+    ["apostrophe in path shaped harness path is safe", ["node", "/Users/o'brien/node_modules/@anthropic-ai/claude-code/cli.js"], "subagent"],
+    ["Windows parentheses in MCP path are safe", ["node.exe", String.raw`C:\Program Files (x86)\@modelcontextprotocol\server-filesystem\index.js`], "mcp-server"],
+  ];
+  test.each(round3Cases)("round 3 %s", (_name, argv, role) => {
+    const input = makeFixture(argv);
+    expect(classifyTreeRoles(input.tree).get(input.pid)?.role).toBe(role);
+  });
+
+  test("a secret inside a matched anchor path never appears in evidence", () => {
+    const input = makeFixture(["node", "/x/SECRET/node_modules/@modelcontextprotocol/server-a/index.js"]);
+    const assignment = classifyTreeRoles(input.tree).get(input.pid)!;
+    expect(assignment.role).toBe("mcp-server");
+    expect(assignment.evidence).not.toContain("SECRET");
+  });
+
   const promptAndDataCases: Array<[string, string[], ProcessRole]> = [
     ['bash -c "grep -rn @openai/codex node_modules/.package-lock.json"', ["bash", "-c", "grep -rn @openai/codex node_modules/.package-lock.json"], "shell"],
     ['bash -c "pip install aider-chat && python run.py"', ["bash", "-c", "pip install aider-chat && python run.py"], "shell"],

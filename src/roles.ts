@@ -15,7 +15,10 @@ export interface CommandFacts {
 const SKIP_NEXT = new Set([
   "-e", "--eval", "-p", "--print", "-c", "--command", "-r", "--require", "--import", "--loader", "-m",
   "--experimental-loader", "-C", "--conditions", "--env-file", "-X", "-W", "--from", "--with", "--python",
-  "--package", "--cwd", "--config", "--model", "--profile",
+  "--package", "--cwd", "--config", "--model", "--profile", "--directory", "--project",
+  "--with-requirements", "--with-editable", "--index", "--index-url", "--extra-index-url", "--group", "--extra",
+  "--spec", "--title", "--watch-path", "--disable-warning", "--input-type", "--test-reporter",
+  "--test-reporter-destination", "--redirect-warnings", "--inspect-port",
 ]);
 const ROLE_INTERPRETERS = new Set([
   "node", "nodejs", "bun", "bunx", "deno", "npx", "pnpx", "uv", "uvx", "pipx", "py", "env",
@@ -27,17 +30,21 @@ const ROLE_SHELLS = new Set([
 const WRAPPER_SUBCOMMANDS = new Set(["run", "tool", "exec", "x", "dlx"]);
 const INLINE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PACKAGE_SPEC = /^(?:(@[^/@\\\s]+\/[^/@\\\s]+)|([^/@\\\s]+))(?:@[^/\\\s]*|==[^/\\\s]*)$/;
-const UNSAFE_ROLE_TOKEN = /["'();\r\n]/;
+const PATH_SHAPED = /^(?:\/|\.\/|\.\.\/|~\/|[A-Za-z]:[\\/]|\\\\)/;
 
 function isValueTakingFlag(token: string): boolean {
   if (SKIP_NEXT.has(token)) return true;
   if ((token.startsWith("-W") || token.startsWith("-X")) && token.length > 2) return false;
+  if (/^-[A-Za-z]+[WX].+$/.test(token)) return false;
+  if (/^-[A-Za-z]+[WX]$/.test(token) && token.length > 2) return true;
   return /^-[A-Za-z]{2,}$/.test(token) && /[epcrC]$/.test(token);
 }
 
 function isSafeRoleToken(token: string): boolean {
-  if (UNSAFE_ROLE_TOKEN.test(token)) return false;
-  return !/\s/.test(token) || /[\\/]|\.(?:[cm]?[jt]s|jsx|tsx|pyw?|rb|pl|php|sh|bash|zsh|fish|ps1|cmd|bat|exe|jar)$/i.test(token);
+  const pathShaped = PATH_SHAPED.test(token);
+  if (/[";\r\n]/.test(token)) return false;
+  if (!pathShaped && /['();]/.test(token)) return false;
+  return !/\s/.test(token) || pathShaped;
 }
 
 /** Split a Windows command line using the modern MSVC C runtime argv rules. */
@@ -92,6 +99,7 @@ function positional(list: readonly string[]): string[] {
       i++;
       continue;
     }
+    if (token === "-") break;
     if (token.startsWith("-")) continue;
     if (!isSafeRoleToken(token)) break;
     result.push(token.toLowerCase());
@@ -161,6 +169,7 @@ export function analyzeCommand(p: Pick<RawOsProcess, "name" | "cmdline" | "argv"
       i++;
       continue;
     }
+    if (token === "-") break;
     if (token.startsWith("-")) continue;
     if (base(exe) === "env" && INLINE_ASSIGNMENT.test(token)) continue;
     if (!isSafeRoleToken(token)) break;
@@ -175,7 +184,13 @@ export function analyzeCommand(p: Pick<RawOsProcess, "name" | "cmdline" | "argv"
       continue;
     }
     const program = stripPackageSpec(token);
-    facts.anchors.push({ name: base(program), path: normalize(program), rest: positional(entry.slice(i + 1)) });
+    const isPython = /^python\d*(\.\d+)?$/.test(base(exe));
+    const programRest = positional(entry.slice(i + 1));
+    if (isPython) facts.anchors[0].rest = [];
+    facts.anchors.push({
+      name: base(program), path: normalize(program),
+      rest: isPython ? programRest.slice(0, 1) : programRest,
+    });
     break;
   }
   return facts;
