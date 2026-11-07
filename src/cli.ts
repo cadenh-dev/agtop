@@ -145,8 +145,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (rest.includes("--json")) console.log(JSON.stringify(catalog, null, 2));
     else if (!catalog.length) console.log(`No roles match "${unknown[0]}".\n`);
     else {
-      const width = Math.max(...catalog.map(item => item.role.length));
-      console.log(catalog.map(item => `${item.role.padEnd(width)}  ${item.label}  ${item.description}`).join("\n") + "\n");
+      const width = Math.max(...catalog.map(item => item.label.length));
+      console.log(catalog.map(item => `${item.role}  ${item.label.padEnd(width)}  ${item.description}`).join("\n") + "\n");
     }
     return;
   }
