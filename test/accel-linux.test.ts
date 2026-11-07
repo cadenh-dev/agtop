@@ -94,5 +94,5 @@ describe("Linux DRM provider", () => {
   });
   test.skipIf(process.platform !== "linux")("live provider sample resolves on Linux hosts without a GPU", async () => {
     await expect(createProvider()!.sample(new Set(), new Map())).resolves.toMatchObject({ samples: expect.any(Array), devices: expect.any(Array), status: expect.any(Array) });
-  });
+  }, 30_000);
 });

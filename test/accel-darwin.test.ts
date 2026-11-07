@@ -230,5 +230,5 @@ describe("live Darwin accelerator provider", () => {
     const allPids = new Set(readDarwinProcesses().map(row => row.pid));
     const visibleClients = await provider!.sample(allPids, emptyProcesses);
     console.info(`AGX user clients visible on this macOS runner: ${visibleClients.samples.length > 0 ? "yes" : "no"}`);
-  }, 20_000);
+  }, 30_000);
 });

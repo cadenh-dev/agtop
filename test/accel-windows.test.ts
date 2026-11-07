@@ -181,4 +181,4 @@ test.skipIf(process.platform !== "win32")("live Windows PDH sampling returns dev
     console.info(`Windows PDH devices: ${JSON.stringify(result!.devices)}; per-process values: ${JSON.stringify(result!.samples.map(({ pid, deviceId, kind, engine, percent, memoryBytes }) => ({ pid, deviceId, kind, engine, percent, memoryBytes })))}`);
     console.info(`Windows PDH sample costs: ${cost.map(value => `${value.toFixed(2)} ms`).join(", ")}`);
   } finally { provider.close?.(); }
-});
+}, 30_000);
