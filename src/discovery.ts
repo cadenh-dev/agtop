@@ -3,6 +3,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { RawOsProcess } from "./types.js";
 import { collectSocketConnections } from "./sockets.js";
+import { envKeys } from "./env-keys.js";
+import { DarwinScannerError, darwinScannerMode, parseDarwinPs, readDarwinProcesses, type DarwinNative } from "./darwin.js";
 export { detectHarness, harnesses, harnessCatalog, harnessKind, harnessLabel, isLocalHarness } from "./harnesses.js";
 export type { HarnessDefinition, HarnessKind, HarnessRule } from "./harnesses.js";
 
@@ -21,7 +23,6 @@ export function parseLinuxStat(raw: string, hz: number, page: number): RawOsProc
     startTime: fields[19], cpuSeconds: (Number(fields[11]) + Number(fields[12])) / hz,
     cpuPercent: 0, memoryMb: Math.max(0, Number(fields[21])) * page / 1048576 };
 }
-const envKeys = new Set(["AGTOP_JOB_ID", "AGTOP_HARNESS", "AGTOP_PEER", "AGTOP_WORKTREE", "AGTOP_BACKEND", "OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"]);
 export function parseEnvironment(raw: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const pair of raw.split("\0")) {
@@ -57,7 +58,7 @@ export async function scanLinuxProcesses(): Promise<RawOsProcess[]> {
       } catch { /* Permission denied or a process exited. */ }
     }
   }));
-  await collectSocketConnections(results);
+  await collectSocketConnections(results, "linux");
   return results;
 }
 export async function scanWindowsProcesses(): Promise<RawOsProcess[]> {
@@ -69,8 +70,31 @@ export async function scanWindowsProcesses(): Promise<RawOsProcess[]> {
     startTime: /^\d+$/.test(String(p.Start)) ? String(p.Start) : "0", cpuSeconds: (Number(p.KernelModeTime || 0) + Number(p.UserModeTime || 0)) / 1e7,
     memoryMb: Number(p.WorkingSetSize || 0) / 1048576, cpuPercent: 0,
   }));
-  await collectSocketConnections(results);
+  await collectSocketConnections(results, "win32");
   return results;
+}
+export async function scanDarwinProcesses(native?: DarwinNative): Promise<RawOsProcess[]> {
+  if (!native && darwinScannerMode() === "ps") {
+    const { stdout } = await exec("/bin/ps", ["-axww", "-o", "pid=,ppid=,pgid=,rss=,time=,lstart=,state=,command="], {
+      encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024,
+      env: { ...process.env, LC_ALL: "C" },
+    });
+    const results = parseDarwinPs(stdout);
+    if (!results.length) throw new DarwinScannerError("macOS ps process scan returned no readable processes.");
+    return results;
+  }
+  const results: RawOsProcess[] = readDarwinProcesses(native).map(record => ({
+    pid: record.pid, ppid: record.ppid, pgid: record.pgid, name: record.name,
+    cmdline: record.argv?.join(" ") || record.execPath || record.name,
+    argv: record.argv, startTime: record.startTime, cpuSeconds: record.cpuSeconds, cpuPercent: 0,
+    memoryMb: record.residentBytes / 1_048_576, cwd: record.cwd,
+    envTags: parseEnvironment(record.env.join("\0")), state: darwinState(record.status),
+  }));
+  if (!native) await collectSocketConnections(results, "darwin");
+  return results;
+}
+function darwinState(status: number): string {
+  return ({ 1: "I", 2: "R", 3: "S", 4: "T", 5: "Z" } as Record<number, string>)[status] || "?";
 }
 export class CpuSampler {
   private previous = new Map<number, { start: string; seconds: number; at: number }>();
