@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { probeLemonade } from "./backend.js";
 import { pruneStaleJobs } from "./registry.js";
-import { harnessCatalog, harnesses, harnessLabel } from "./harnesses.js";
+import { searchHarnesses, harnesses, harnessLabel } from "./harnesses.js";
 import { killAgentTree, listAgentTrees, spawnContainedAgent } from "./manager.js";
 import type { AgentProcessTree, HarnessType, ManagedAgent } from "./types.js";
 
@@ -271,7 +271,8 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
         results.push({ jobId, error: e instanceof Error ? e.message : String(e) });
       }
     }
-    return text({ jobs: results, staleRecordsRemoved: pruneStaleJobs() });
+    pruneStaleJobs();
+    return text({ jobs: results });
   });
 
   server.registerTool("harnesses", {
@@ -280,8 +281,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
     inputSchema: { query: z.string().max(200).optional().describe("Filter by id, label, or kind.") },
     annotations: { readOnlyHint: true },
   }, async ({ query }) => {
-    const q = query?.toLowerCase();
-    const catalog = harnessCatalog().filter(item => !q || `${item.id} ${item.label} ${item.kind}`.toLowerCase().includes(q));
+    const catalog = searchHarnesses(query);
     return text({ harnesses: catalog });
   });
 

@@ -457,6 +457,11 @@ export function harnessCatalog(): Array<{ id: HarnessType; label: string; kind: 
   return HARNESS_DEFINITIONS.map(({ id, label, kind }) => ({ id, label, kind }));
 }
 
+export function searchHarnesses(query?: string): Array<{ id: HarnessType; label: string; kind: HarnessKind }> {
+  const q = query?.toLowerCase().trim() ?? "";
+  return harnessCatalog().filter(item => `${item.id} ${item.label} ${item.kind}`.toLowerCase().includes(q));
+}
+
 const wrappers = new Set([
   "node", "nodejs", "bun", "bunx", "deno", "python", "python3", "python3.12", "py",
   "uv", "uvx", "pipx", "npx", "pnpx", "cmd", "sh", "bash", "zsh", "fish", "powershell", "pwsh", "env",
