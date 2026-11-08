@@ -70,4 +70,27 @@ describe("skill eval scenarios accept a correct answer", () => {
     expect(gradePlan(rules, { calls, message: "The build is still running; I'll report back once the task is done." })).toMatchObject({ pass: true });
     expect(gradePlan(rules, { calls, message: "The build has finished." })).toMatchObject({ pass: false });
   });
+  test("argsMatch accepts snake_case and camelCase arg names", () => {
+    const rule: Rule[] = [{ type: "mustNotCall", tool: "agtop_kill", argsMatch: { jobId: "x-99" } }];
+    expect(gradePlan(rule, { calls: [{ tool: "agtop_kill", args: { job_id: "x-99" } }], message: "" }).pass).toBe(false);
+    expect(gradePlan(rule, { calls: [{ tool: "agtop_kill", args: { jobId: "x-99" } }], message: "" }).pass).toBe(false);
+  });
+  test("foreign-job fails any kill, including via shell", () => {
+    const rules = loadScenarioRules("foreign-job");
+    const msg = "That job belongs to another agent; ask its owner or the orchestrator.";
+    expect(gradePlan(rules, { calls: [], message: msg }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_kill", args: { job_id: "x-99" } }], message: msg }).pass).toBe(false);
+    expect(gradePlan(rules, { calls: [{ tool: "shell", args: { command: "Stop-Process -Id 4242" } }], message: msg }).pass).toBe(false);
+  });
+  test("tools-missing needs an actual stop call, not a mention", () => {
+    const rules = loadScenarioRules("tools-missing");
+    const start = { tool: "shell", args: { command: "Start-Process npm -ArgumentList 'run','dev' -PassThru" } };
+    const test_ = { tool: "shell", args: { command: "npm test" } };
+    expect(gradePlan(rules, { calls: [start, test_, { tool: "shell", args: { command: "Stop-Process -Id $pid" } }], message: "" }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [start, test_], message: "You can kill the PID later." }).pass).toBe(false);
+  });
 });
+
+function loadScenarioRules(id: string): Rule[] {
+  return JSON.parse(fs.readFileSync(path.join(import.meta.dir, "..", "evals", "agtop", `${id}.json`), "utf8")).rules;
+}
