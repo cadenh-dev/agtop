@@ -1,0 +1,39 @@
+{
+  "id": "duplicate-dev-server",
+  "priorCalls": [
+    {
+      "tool": "agtop_list",
+      "args": {},
+      "result": {
+        "jobs": [
+          {
+            "jobId": "agent-dev-22",
+            "harness": "custom",
+            "peer": "agent-22",
+            "owned": false,
+            "command": "npm run dev",
+            "cwd": "C:/work/agent-aware-process-manager",
+            "git": { "repoRoot": "C:/work/agent-aware-process-manager", "isWorktree": false },
+            "roleCounts": { "server": 1 },
+            "cpuPercent": 4.1,
+            "memoryMb": 384,
+            "gpuPercent": 0,
+            "npuPercent": 0,
+            "processCount": 1,
+            "listening": ["127.0.0.1:3000"]
+          }
+        ]
+      }
+    }
+  ],
+  "prompt": "Start the dev server so I can try the app.",
+  "rules": [
+    { "type": "mustNotCall", "tool": "agtop_kill" },
+    { "type": "mustNotCall", "tool": "agtop_run", "argsMatch": { "command": "npm.*dev|dev", "args": "dev" } },
+    { "type": "mustNotCall", "tool": "shell", "argsMatch": { "command": "npm.*run.*dev|bun.*run.*dev|vite|next dev" } },
+    {
+      "type": "messageMatches",
+      "regex": "((already running|reuse)[\\s\\S]*(http://localhost:3000|3000))|((http://localhost:3000|3000)[\\s\\S]*(already running|reuse))|((ask|would you like|should I)[\\s\\S]*(existing|running|server))"
+    }
+  ]
+}

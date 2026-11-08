@@ -116,6 +116,23 @@ describe("skill eval scenarios accept a correct answer", () => {
     expect(gradePlan(rules, { calls: [{ tool: "agtop_kill", args: { jobId: "agent-dev-17" } }], message: "Killed it and started the server." }).pass).toBe(false);
     expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "npm", args: ["run", "dev", "--", "--port", "3000"], jobId: "dev-1" } }], message: "Started." }).pass).toBe(false);
   });
+
+  test("duplicate-dev-server accepts reuse or asking, and rejects duplicate starts or kills", () => {
+    const rules = loadScenarioRules("duplicate-dev-server");
+    expect(gradePlan(rules, { calls: [], message: "The dev server is already running at http://localhost:3000. You can use it now." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [], message: "I found the server on port 3000. Would you like me to reuse the existing server?" }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "npm", args: ["run", "dev"], jobId: "dev-2" } }], message: "The existing server is still running." }).pass).toBe(false);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_kill", args: { jobId: "agent-dev-22" } }], message: "I stopped the old server and started another one on port 3000." }).pass).toBe(false);
+  });
+
+  test("busy-accelerator requires a contention response and accepts waiting, asking, or a warned launch", () => {
+    const rules = loadScenarioRules("busy-accelerator");
+    expect(gradePlan(rules, { calls: [], message: "Another job is using 99% of the GPU, so I will wait before running the benchmark." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [], message: "The NPU is already in use by another job. Would you like me to wait or start the benchmark anyway?" }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "bun", args: ["run", "bench:model"], jobId: "bench-1" } }], message: "Warning: the other job is using 98% GPU and 96% NPU, so this benchmark may compete for accelerator capacity and run slower." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "bun", args: ["run", "bench:model"], jobId: "bench-1" } }], message: "Started in the background." }).pass).toBe(false);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_kill", args: { jobId: "agent-model-9" } }], message: "The GPU is busy, so I stopped the other job." }).pass).toBe(false);
+  });
 });
 
 function loadScenarioRules(id: string): Rule[] {

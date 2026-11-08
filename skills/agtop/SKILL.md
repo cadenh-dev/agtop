@@ -27,6 +27,7 @@ The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `
 
 - Before heavy or port-binding work, check `agtop_list`; it shows shared jobs, peers, ports, and CPU, memory, GPU, and NPU totals.
 - Reuse or wait for an equivalent job another agent already runs instead of starting a duplicate.
+- If another job is using nearly all GPU/NPU capacity, tell the user and wait, ask, or launch another heavy job only with an explicit contention warning.
 - If another agent's job holds a needed port or resource, never kill it; choose another port, reuse the job, or tell the user/orchestrator.
 - Prefer `agtop_list` over shell `ps` or `netstat` to discover agent jobs.
 
