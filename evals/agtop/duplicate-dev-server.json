@@ -29,7 +29,7 @@
   "prompt": "Start the dev server so I can try the app.",
   "rules": [
     { "type": "mustNotCall", "tool": "agtop_kill" },
-    { "type": "mustNotCall", "tool": "agtop_run", "argsMatch": { "command": "npm.*dev|dev", "args": "dev" } },
+    { "type": "mustNotCall", "tool": "agtop_run", "argsMatch": { "args": "dev" } },
     { "type": "mustNotCall", "tool": "shell", "argsMatch": { "command": "npm.*run.*dev|bun.*run.*dev|vite|next dev" } },
     {
       "type": "messageMatches",

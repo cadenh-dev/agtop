@@ -133,6 +133,15 @@ describe("skill eval scenarios accept a correct answer", () => {
     expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "bun", args: ["run", "bench:model"], jobId: "bench-1" } }], message: "Started in the background." }).pass).toBe(false);
     expect(gradePlan(rules, { calls: [{ tool: "agtop_kill", args: { jobId: "agent-model-9" } }], message: "The GPU is busy, so I stopped the other job." }).pass).toBe(false);
   });
+  test("busy-accelerator accepts a multi-line warning", () => {
+    const rules = loadScenarioRules("busy-accelerator");
+    expect(gradePlan(rules, { calls: [], message: "I have not started the benchmark.\nAnother job is using 98% of the GPU.\nShould I wait for it to finish?" }).pass).toBe(true);
+  });
+  test("duplicate-dev-server catches npm with args run dev", () => {
+    const rules = loadScenarioRules("duplicate-dev-server");
+    const msg = "The dev server is already running at http://127.0.0.1:3000.";
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "npm", args: ["run", "dev"], job_id: "dev" } }], message: msg }).pass).toBe(false);
+  });
 });
 
 function loadScenarioRules(id: string): Rule[] {

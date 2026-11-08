@@ -31,7 +31,7 @@
       "rules": [
         {
           "type": "messageMatches",
-          "regex": "(?=.*(?:wait|hold|defer|ask|would you like|should I))(?=.*(?:GPU|NPU|accelerator|contention|another job|already in use))[\\s\\S]+"
+          "regex": "(?=[\\s\\S]*(?:wait|hold|defer|ask|would you like|should I))(?=[\\s\\S]*(?:GPU|NPU|accelerator|contention|another job|already in use))[\\s\\S]+"
         },
         {
           "type": "anyOf",
@@ -44,7 +44,7 @@
     },
     {
       "type": "messageMatches",
-      "regex": "(?=.*(?:GPU|NPU|accelerator|contention|another job|already in use))(?=.*(?:wait|hold|defer|ask|would you like|should I|warning|warn|may slow|compete))[\\s\\S]+"
+      "regex": "(?=[\\s\\S]*(?:GPU|NPU|accelerator|contention|another job|already in use))(?=[\\s\\S]*(?:wait|hold|defer|ask|would you like|should I|warning|warn|may slow|compete))[\\s\\S]+"
     }
   ]
 }
