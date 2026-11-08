@@ -1,0 +1,8 @@
+{
+  "id": "check-before-heavy-job",
+  "prompt": "Start `bun run build` as a long build job and keep it running so I can check on it later.",
+  "rules": [
+    { "type": "firstCall", "tool": "agtop_list" },
+    { "type": "mustCall", "tool": "agtop_run" }
+  ]
+}

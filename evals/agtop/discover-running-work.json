@@ -1,0 +1,9 @@
+{
+  "id": "discover-running-work",
+  "prompt": "Is the dev server already running? What are the other agents running right now?",
+  "rules": [
+    { "type": "mustCall", "tool": "agtop_list" },
+    { "type": "mustNotCall", "tool": "agtop_kill" },
+    { "type": "mustNotCall", "tool": "shell", "argsMatch": { "command": "ps|netstat" } }
+  ]
+}

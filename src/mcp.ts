@@ -42,7 +42,7 @@ interface OwnedJob {
 
 const owned = new Map<string, OwnedJob>();
 
-const instructions = `agtop provides task-scoped OS containment and classifies process roles. Use "run" for long-lived helpers or subagents that must not outlive the task; it returns a job ID. Use "wait" to wait for exit, "status" to inspect roles and listening ports for owned jobs, and "kill" or "cleanup" before finishing. "kill" only accepts jobs created by this MCP session. "run" discards stdout and stderr, so use the normal shell for commands whose output you need. If "wait" times out, the job is still running. agtop manages process lifetimes; it is not a security sandbox.`;
+const instructions = `agtop provides task-scoped OS containment and classifies process roles. Use "run" for long-lived helpers or subagents that must not outlive the task; it returns a job ID. Use "wait" to wait for exit, "status" to inspect roles and listening ports for owned jobs, and "kill" or "cleanup" before finishing. "list" shows shared agent jobs, peers, ports, and CPU, memory, GPU, and NPU totals; check it before heavy or port-binding work and avoid duplicating or killing another agent's job. "kill" only accepts jobs created by this MCP session. "run" discards stdout and stderr, so use the normal shell for commands whose output you need. If "wait" times out, the job is still running. agtop manages process lifetimes; it is not a security sandbox.`;
 
 function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
@@ -76,6 +76,7 @@ export function summary(tree: AgentProcessTree) {
     gpuPercent: tree.gpuPercent,
     npuPercent: tree.npuPercent,
     gpuMemoryMb: tree.gpuMemoryMb,
+    listening: [...new Set(tree.processes.flatMap(p => (p.listeningSockets ?? []).map(socket => formatListeningEndpoint(socket.address, socket.port))))],
     processCount: tree.processes.length,
     git: tree.git
       ? { repoRoot: tree.git.repoRoot, branch: tree.git.branch, isWorktree: tree.git.isWorktree }
@@ -142,7 +143,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
 
   server.registerTool("list", {
     title: "List agent trees",
-    description: "List known agent trees with harness, process role counts, worktree, CPU, memory, GPU/NPU totals, and containment mode. Command lines are omitted for jobs this session does not own.",
+    description: "List known agent trees with harness, process role counts, listening ports, worktree, CPU, memory, GPU/NPU totals, and containment mode. Command lines are omitted for jobs this session does not own.",
     inputSchema: { query: z.string().max(200).optional().describe("Filter by job, harness, role, peer, branch, backend, or containment mode.") },
     annotations: { readOnlyHint: true },
   }, async ({ query }) => {

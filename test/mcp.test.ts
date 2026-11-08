@@ -96,10 +96,11 @@ test("MCP summaries expose tree aggregates and owned process accelerators", () =
     processes: [{
       pid: 5, ppid: 0, name: "agent", cmdline: "agent", startTime: "1", cpuSeconds: 0,
       cpuPercent: 0, memoryMb: 0, role: "agent", roleSource: "job", roleEvidence: "root",
+      listeningSockets: [{ address: "127.0.0.1", port: 3000 }],
       accelerators: [{ deviceId: "gpu0", kind: "gpu", utilizationPercent: 61 }],
     }],
   } as AgentProcessTree;
-  expect(summary(tree)).toMatchObject({ gpuPercent: 61, npuPercent: 12, gpuMemoryMb: 256 });
+  expect(summary(tree)).toMatchObject({ gpuPercent: 61, npuPercent: 12, gpuMemoryMb: 256, listening: ["127.0.0.1:3000"] });
   expect(ownedProcessSummary(tree.processes[0])).toMatchObject({ accelerators: [{ deviceId: "gpu0", utilizationPercent: 61 }] });
   const ownedStatus = statusPayload(tree, true, true);
   expect(ownedStatus.processes).toMatchObject([{ accelerators: [{ deviceId: "gpu0" }] }]);

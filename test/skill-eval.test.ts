@@ -89,6 +89,33 @@ describe("skill eval scenarios accept a correct answer", () => {
     expect(gradePlan(rules, { calls: [start, test_, { tool: "shell", args: { command: "Stop-Process -Id $pid" } }], message: "" }).pass).toBe(true);
     expect(gradePlan(rules, { calls: [start, test_], message: "You can kill the PID later." }).pass).toBe(false);
   });
+
+  test("check-before-heavy-job requires checking the shared list before launch", () => {
+    const rules = loadScenarioRules("check-before-heavy-job");
+    expect(gradePlan(rules, { calls: [
+      { tool: "agtop_list", args: {} },
+      { tool: "agtop_run", args: { command: "model-server", jobId: "model-1" } },
+    ], message: "Started." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [
+      { tool: "agtop_run", args: { command: "model-server", jobId: "model-1" } },
+      { tool: "agtop_list", args: {} },
+    ], message: "Started." }).pass).toBe(false);
+  });
+
+  test("discover-running-work uses agtop_list and kills nothing", () => {
+    const rules = loadScenarioRules("discover-running-work");
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_list", args: {} }], message: "The server is already running." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [{ tool: "shell", args: { command: "ps aux | netstat -an" } }], message: "No agent jobs found." }).pass).toBe(false);
+  });
+
+  test("port-collision preserves the foreign job and chooses a safe resolution", () => {
+    const rules = loadScenarioRules("port-collision");
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "npm", args: ["run", "dev", "--", "--port", "3001"], jobId: "dev-1" } }], message: "Started on port 3001." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [], message: "Port 3000 is in use by the other agent; I will reuse its server." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [], message: "Port 3000 belongs to another agent.\n1. Reuse its server.\n2. Start this server on port 3001." }).pass).toBe(true);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_kill", args: { jobId: "agent-dev-17" } }], message: "Killed it and started the server." }).pass).toBe(false);
+    expect(gradePlan(rules, { calls: [{ tool: "agtop_run", args: { command: "npm", args: ["run", "dev", "--", "--port", "3000"], jobId: "dev-1" } }], message: "Started." }).pass).toBe(false);
+  });
 });
 
 function loadScenarioRules(id: string): Rule[] {

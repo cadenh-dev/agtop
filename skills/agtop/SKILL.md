@@ -23,6 +23,13 @@ The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `
    - `agtop_kill { "jobId": "task-123" }`
    - or `agtop_cleanup {}` to stop every job this session created.
 
+## Multi-agent awareness
+
+- Before heavy or port-binding work, check `agtop_list`; it shows shared jobs, peers, ports, and CPU, memory, GPU, and NPU totals.
+- Reuse or wait for an equivalent job another agent already runs instead of starting a duplicate.
+- If another agent's job holds a needed port or resource, never kill it; choose another port, reuse the job, or tell the user/orchestrator.
+- Prefer `agtop_list` over shell `ps` or `netstat` to discover agent jobs.
+
 ## Rules
 
 - Always pass a task-specific `jobId`; treat it as the task ID. Use `peer` to label the task or tenant.
