@@ -2,9 +2,13 @@
   "id": "dev-server-and-tests",
   "prompt": "Start the dev server with `npm run dev`, then run the test suite with `npm test` and tell me the results.",
   "rules": [
-    { "type": "mustCall", "tool": "agtop_run", "argsMatch": { "command": "npm", "args": "dev" } },
+    { "type": "anyOf", "rules": [
+      { "type": "mustCall", "tool": "agtop_run", "argsMatch": { "command": "npm", "args": "dev" } },
+      { "type": "mustCall", "tool": "agtop_run", "argsMatch": { "command": "npm.*dev" } }
+    ] },
     { "type": "mustNotCall", "tool": "agtop_run", "argsMatch": { "args": "test" } },
-    { "type": "mustCall", "tool": "shell", "argsMatch": { "command": "npm", "args": "test" } },
+    { "type": "mustNotCall", "tool": "agtop_run", "argsMatch": { "command": "test" } },
+    { "type": "mustCall", "tool": "shell", "argsMatch": { "command": "npm\\s+(run\\s+)?test" } },
     { "type": "mustCall", "tool": "agtop_run", "argsMatch": { "jobId": ".+" } },
     { "type": "anyOf", "rules": [ { "type": "lastCall", "tool": "agtop_cleanup" }, { "type": "lastCall", "tool": "agtop_kill" } ] }
   ]

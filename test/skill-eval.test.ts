@@ -42,3 +42,32 @@ test("all agtop eval scenarios load with valid rules", () => {
     expect(validateRules(scenario.rules)).toBe(true);
   }
 });
+
+describe("skill eval scenarios accept a correct answer", () => {
+  const load = (id: string) => JSON.parse(fs.readFileSync(path.join(import.meta.dir, "..", "evals", "agtop", `${id}.json`), "utf8")).rules as Rule[];
+
+  test("dev-server-and-tests: single-string shell test command passes", () => {
+    const plan = { calls: [
+      { tool: "agtop_run", args: { command: "npm", args: ["run", "dev"], jobId: "task-dev" } },
+      { tool: "shell", args: { command: "npm test" } },
+      { tool: "agtop_cleanup", args: {} },
+    ], message: "Tests passed." };
+    expect(gradePlan(load("dev-server-and-tests"), plan)).toMatchObject({ pass: true });
+  });
+
+  test("dev-server-and-tests: dev server as one command string passes", () => {
+    const plan = { calls: [
+      { tool: "agtop_run", args: { command: "npm run dev", jobId: "task-dev" } },
+      { tool: "shell", args: { command: "npm run test" } },
+      { tool: "agtop_kill", args: { jobId: "task-dev" } },
+    ], message: "Done." };
+    expect(gradePlan(load("dev-server-and-tests"), plan)).toMatchObject({ pass: true });
+  });
+
+  test("wait-timeout: promising to report when done passes, claiming done fails", () => {
+    const rules = load("wait-timeout");
+    const calls = [{ tool: "agtop_status", args: { jobId: "task-build" } }];
+    expect(gradePlan(rules, { calls, message: "The build is still running; I'll report back once the task is done." })).toMatchObject({ pass: true });
+    expect(gradePlan(rules, { calls, message: "The build has finished." })).toMatchObject({ pass: false });
+  });
+});
