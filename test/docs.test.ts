@@ -28,3 +28,26 @@ describe("README documentation", () => {
     for (const source of sources) expect(section).toContain(`\`${source}\``);
   });
 });
+
+describe("agtop skill and MCP instructions", async () => {
+  const skill = await readFile(new URL("../skills/agtop/SKILL.md", import.meta.url), "utf8");
+  const mcpSource = await readFile(new URL("../src/mcp.ts", import.meta.url), "utf8");
+  const description = skill.match(/^description: (.+)$/m)?.[1] ?? "";
+  const instructions = mcpSource.match(/const instructions = `([^`]+)`/)?.[1] ?? "";
+
+  test("skill description lists triggers, not the workflow", () => {
+    expect(description).toStartWith("Use when");
+    expect(description).toContain("Not for short commands whose output you need");
+    expect(description).not.toMatch(/\brun, wait\b|\bCovers\b/);
+  });
+
+  test("skill and MCP instructions agree on the key rules", () => {
+    expect(instructions).not.toBe("");
+    for (const text of [skill, instructions]) {
+      expect(text).toMatch(/discards (stdout|output)/);
+      expect(text).toContain("cleanup");
+      expect(text).toMatch(/times out/);
+      expect(text).toContain("only accepts jobs created by this MCP session");
+    }
+  });
+});

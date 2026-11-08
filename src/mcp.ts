@@ -42,7 +42,7 @@ interface OwnedJob {
 
 const owned = new Map<string, OwnedJob>();
 
-const instructions = `agtop provides task-scoped OS containment and classifies process roles. Use "run" for long-lived helpers or subagents that must not outlive the task; it returns a job ID. Use "wait" to wait for exit, "status" to inspect roles and listening ports for owned jobs, and "kill" or "cleanup" before finishing. "kill" only accepts jobs created by this MCP session. agtop manages process lifetimes; it is not a security sandbox.`;
+const instructions = `agtop provides task-scoped OS containment and classifies process roles. Use "run" for long-lived helpers or subagents that must not outlive the task; it returns a job ID. Use "wait" to wait for exit, "status" to inspect roles and listening ports for owned jobs, and "kill" or "cleanup" before finishing. "kill" only accepts jobs created by this MCP session. "run" discards stdout and stderr, so use the normal shell for commands whose output you need. If "wait" times out, the job is still running. agtop manages process lifetimes; it is not a security sandbox.`;
 
 function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };

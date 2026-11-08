@@ -1,6 +1,6 @@
 ---
 name: agtop
-description: Use agtop's MCP tools for task-scoped containment when starting long-lived helpers, watchers, dev servers, test runners, or subagents that must not leak after the task. Covers run, wait, status, kill, cleanup, and the scoped ownership rules.
+description: Use when starting a process that may outlive the current turn or task, such as a dev server, watcher, test runner, or subagent, or anything launched through a shell that may exit first. Not for short commands whose output you need to read.
 ---
 
 # agtop task containment
