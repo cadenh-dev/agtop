@@ -50,6 +50,10 @@ bun agtop.ts kill JOB_ID
 bun agtop.ts lemonade --json
 ```
 
+## Skill evals
+
+Run the manual agent decision evals after editing `skills/agtop/SKILL.md` with `bun run eval:skill`. Choose `--agent claude`, `--agent codex`, or `--agent both`; use `--scenario short-command` (repeatable or comma-separated) to filter scenarios. Add `--dry-run` to print prompts without calling an agent. This harness is not part of `bun test`; real runs make paid agent CLI calls.
+
 On Windows, pass `.cmd`, `.bat`, and `.ps1` shims through an explicit interpreter:
 
 ```powershell

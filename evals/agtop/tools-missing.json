@@ -1,0 +1,9 @@
+{
+  "id": "tools-missing",
+  "tools": ["shell"],
+  "prompt": "Start the dev server with `npm run dev` in the background, then run `npm test`.",
+  "rules": [
+    { "type": "noToolPrefix", "prefix": "agtop_" },
+    { "type": "callsOrMessageMatches", "regex": "pid|kill|Stop-Process" }
+  ]
+}

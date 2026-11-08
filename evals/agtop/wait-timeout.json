@@ -1,0 +1,12 @@
+{
+  "id": "wait-timeout",
+  "priorCalls": [
+    { "tool": "agtop_run", "args": { "command": "npm", "args": ["run", "build"], "jobId": "task-build" }, "result": { "ok": true } },
+    { "tool": "agtop_wait", "args": { "jobId": "task-build", "timeoutMs": 60000 }, "result": { "timedOut": true, "running": true } }
+  ],
+  "prompt": "Continue the task: the build must finish before you report back.",
+  "rules": [
+    { "type": "firstCall", "tools": ["agtop_status", "agtop_kill", "agtop_wait"] },
+    { "type": "messageNotMatches", "regex": "(build|task).{0,30}(finished|complete|done)|finished.{0,30}(build|task)" }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "id": "short-command",
+  "prompt": "Check which git branch I'm on and show the last 5 commits.",
+  "rules": [
+    { "type": "mustNotCall", "tool": "agtop_run" },
+    { "type": "mustCall", "tool": "shell", "argsMatch": { "command": "git" } }
+  ]
+}

@@ -21,6 +21,7 @@
     "check": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "bun test",
     "test:mcp": "bun scripts/mcp-smoke.ts",
+    "eval:skill": "bun scripts/skill-eval.ts",
     "bench:containment": "bun scripts/ab-containment.ts",
     "compile": "bun build src/cli.ts --compile --outfile dist/agtop",
     "desktop:build": "bun scripts/build-desktop.ts",

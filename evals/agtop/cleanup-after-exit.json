@@ -1,0 +1,10 @@
+{
+  "id": "cleanup-after-exit",
+  "priorCalls": [
+    { "tool": "agtop_run", "args": { "command": "npm", "args": ["run", "dev"], "jobId": "task-dev" }, "result": { "ok": true } },
+    { "tool": "agtop_run", "args": { "command": "npm", "args": ["run", "watch"], "jobId": "task-watch" }, "result": { "ok": true } },
+    { "tool": "agtop_status", "args": { "jobIds": ["task-dev", "task-watch"] }, "result": { "jobs": [{ "jobId": "task-dev", "running": false }, { "jobId": "task-watch", "running": false }] } }
+  ],
+  "prompt": "The work is done. Wrap up.",
+  "rules": [ { "type": "mustCall", "tool": "agtop_cleanup" } ]
+}
