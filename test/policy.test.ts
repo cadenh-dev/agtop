@@ -126,7 +126,7 @@ describe("ResourcePolicyGuard", () => {
     const { values, guard } = harness({ gpu: 99 });
     expect(guard.sample()[0]).toMatchObject({ rule: "gpu-busy", decision: "defer" });
     values.gpu = undefined;
-    expect(guard.sample()[0]).toMatchObject({ rule: "gpu-busy", decision: "resume" });
+    expect(guard.sample()[0]).toEqual({ rule: "gpu-busy", decision: "resume", measured: null, threshold: 70 });
     expect(guard.state()[0]).toMatchObject({ rule: "gpu-busy", closed: false, measured: null });
     const offKind = harness({ npu: 10 });
     expect(offKind.guard.sample()).toEqual([]);

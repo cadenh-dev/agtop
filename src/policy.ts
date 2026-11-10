@@ -88,7 +88,8 @@ export function saveAdmissionPolicy(policy: AdmissionPolicy): void {
   writePrivateFileAtomic(path.join(fleetDir(), "policy.json"), `${JSON.stringify(validated, null, 2)}\n`);
 }
 
-export interface PolicyTransition { rule: PolicyRule; decision: "defer" | "resume"; measured: number; threshold: number }
+/** measured is null when an unmeasurable value reopened the guard (lead decision D15; matches PolicyEvent.measured). */
+export interface PolicyTransition { rule: PolicyRule; decision: "defer" | "resume"; measured: number | null; threshold: number }
 interface GuardProbes { accelerators: () => AcceleratorSnapshot | undefined; freeMemoryMb: () => number; now: () => number }
 interface GuardCell { closed: boolean; measured: number | null; changedAt: string }
 const RULES: readonly PolicyRule[] = ["gpu-busy", "npu-busy", "memory-low"];
@@ -163,8 +164,8 @@ export class ResourcePolicyGuard {
     if (closed === cell.closed) return;
     cell.closed = closed;
     cell.changedAt = new Date(this.probes.now()).toISOString();
-    // PolicyTransition.measured is a number; an unmeasurable value is reported as 0.
-    transitions.push({ rule, decision: closed ? "defer" : "resume", measured: measured ?? 0, threshold: closed ? closeThreshold : openThreshold });
+    // An unmeasurable value is reported as null, never as a fake 0 % reading.
+    transitions.push({ rule, decision: closed ? "defer" : "resume", measured, threshold: closed ? closeThreshold : openThreshold });
   }
 
   /** Pure with respect to the last sample. */
