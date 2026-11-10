@@ -154,6 +154,28 @@ windowsOnly("windowsPipeCaptureProvider", () => {
     expect(await canListen(`\\\\.\\pipe\\agtop-${jobId}-stderr-${nonce}`)).toBe(true);
   }, 60_000);
 
+  test("a failed client open leaves no timer behind that could reject later", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let failure = "";
+      try {
+        await openWindowsPipeSession(`win-openfail-${randomUUID()}`, {
+          connectTimeoutMs: 100,
+          openClient: (name, access, open) => open(access === 0x40000000 ? `${name}-absent` : name, access),
+        });
+      } catch (error) {
+        failure = String(error);
+      }
+      expect(failure).toContain("capture-error");
+      await sleep(400); // well past connectTimeoutMs
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  }, 60_000);
+
   test("a pipe connection that never arrives times out with capture-error and frees the names", async () => {
     const jobId = `win-noconnect-${randomUUID()}`;
     const nonce = randomUUID();

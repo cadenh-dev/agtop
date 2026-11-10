@@ -129,16 +129,19 @@ export async function openWindowsPipeSession(jobId: string, options: WindowsPipe
       server.once("connection", (socket) => { sockets.push(socket); server.close(); resolve(socket); });
       server.once("error", () => reject(new Error("capture-error: Windows capture pipe server failed.")));
     }));
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("capture-error: Windows capture pipe connection timed out.")), options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
-    });
+    // If an open below throws, nobody awaits these; a late server error must not be unhandled.
+    for (const promise of connected) promise.catch(() => undefined);
     const nativeOpen = (name: string, access: number) => windows.openInheritable(name, access);
     const openClient = options.openClient;
     const open = openClient ? (name: string, access: number) => openClient(name, access, nativeOpen) : nativeOpen;
     handles.push(open(names.stdin, GENERIC_READ));
     handles.push(open(names.stdout, GENERIC_WRITE));
     handles.push(open(names.stderr, GENERIC_WRITE));
+    // The timer starts only after every open succeeded, so a failed open never leaves it running.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("capture-error: Windows capture pipe connection timed out.")), options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
+    });
     let stdout: net.Socket, stderr: net.Socket;
     try { [stdout, stderr] = await Promise.race([Promise.all(connected), timedOut]); } finally { clearTimeout(timer); }
     return new WindowsPipeCaptureSession(windows, {
