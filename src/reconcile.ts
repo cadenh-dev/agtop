@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -41,9 +42,20 @@ function parseLockHolder(raw: string): SupervisorIdentity | undefined {
   return undefined;
 }
 function readLockRaw(lockPath: string): string | undefined { try { return fs.readFileSync(lockPath, "utf8"); } catch { return undefined; } }
+/**
+ * Removes a stale lock only if it still holds `raw`. Read-then-delete would let a slower waiter
+ * delete a lock another waiter just created, so the file is first renamed aside (only one
+ * process can move it), checked, and put back with link() (which never overwrites) if it is
+ * someone's fresh lock.
+ */
 function deleteIfUnchanged(lockPath: string, raw: string): boolean {
-  if (readLockRaw(lockPath) !== raw) return false;
-  try { fs.rmSync(lockPath, { force: true }); return true; } catch { return false; }
+  const aside = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
+  try { fs.renameSync(lockPath, aside); } catch { return false; }
+  try {
+    if (fs.readFileSync(aside, "utf8") === raw) return true;
+    try { fs.linkSync(aside, lockPath); } catch { /* A newer lock already exists; nothing to restore. */ }
+    return false;
+  } catch { return false; } finally { fs.rmSync(aside, { force: true }); }
 }
 
 /**
@@ -129,7 +141,12 @@ function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: 
   if (remaining.length > RETENTION_MAX_JOBS) {
     const exitedAtMs = (record: JobRecordV2): number => { const parsed = record.exitedAt === null ? Number.NaN : Date.parse(record.exitedAt); return Number.isFinite(parsed) ? parsed : 0; };
     remaining.sort((a, b) => exitedAtMs(a) - exitedAtMs(b) || (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0));
-    for (let index = 0; index < remaining.length - RETENTION_MAX_JOBS; index++) remove(remaining[index]);
+    // Protected dependencies do not count against the excess; keep removing unprotected ones.
+    let excess = remaining.length - RETENTION_MAX_JOBS;
+    for (const record of remaining) {
+      if (excess <= 0) break;
+      if (!protectedIds.has(record.jobId)) { remove(record); excess -= 1; }
+    }
   }
   return pruned;
 }
@@ -193,6 +210,7 @@ export async function reconcileFleet(store: EventStore, index: JobIndex, options
           { exitedAt: new Date(nowMs).toISOString(), exitCode: null, lastSeq: writer.lastSeq, outputBytes: counters }, detail.slice(0, 500));
       } finally { writer.close(); }
       index.apply(event); stats.lost.push(jobId); releaseJobLeases(jobId);
+      record.state = "lost"; record.exitedAt = new Date(nowMs).toISOString(); // counts toward retention this pass
     }
     stats.pruned.push(...pruneJobDirs(store, records, nowMs));
   });

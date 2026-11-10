@@ -7,7 +7,7 @@ import { EventStore, encodeFrame, fleetDir, jobDir } from "../src/event-store.js
 import { FleetError } from "../src/fleet-errors.js";
 import { JobIndex } from "../src/job-index.js";
 import { RETENTION_HOURS, RETENTION_MAX_JOBS, reconcileFleet, supervisorAlive, withFleetLock } from "../src/reconcile.js";
-import { writeJob, type ProcessIdentity } from "../src/registry.js";
+import { processSnapshot, writeJob, type ProcessIdentity } from "../src/registry.js";
 import type { JobEvent, JobRecord, JobRecordV2, KillResult, StateEvent, SupervisorIdentity } from "../src/types.js";
 
 let root = "", previousStateDir: string | undefined;
@@ -168,6 +168,15 @@ test("retention keeps at most RETENTION_MAX_JOBS terminal jobs and removes the o
   expect(fs.existsSync(jobDir(`bulk-${String(total - 1).padStart(3, "0")}`))).toBe(true);
 });
 
+test("count retention skips protected dependencies but still removes the full excess", async () => {
+  const store = new EventStore(), index = new JobIndex(store, { readV1: () => [] }); const base = Date.now() - 3_600_000, total = RETENTION_MAX_JOBS + 2;
+  for (let index0 = 0; index0 < total; index0++) writeTerminalLog(`bulk-${String(index0).padStart(3, "0")}`, new Date(base + index0 * 1000).toISOString());
+  createJob("waiter", "queued", LIVE, { queue: { admission: "queued", priority: 0, dependsOn: ["bulk-000"], resources: {}, leasePorts: [], leaseTtlMs: 0, timeoutMs: 0, maxQueueMs: 0 } });
+  const stats = await reconcileFleet(store, index, { snapshot: () => liveSnapshot, kill: noKill });
+  expect(stats.pruned).toEqual(["bulk-001", "bulk-002"]);
+  expect(fs.existsSync(jobDir("bulk-000"))).toBe(true);
+});
+
 test("supervisorAlive compares pid and start time, and pid 0 is never alive", () => {
   const snapshot: ProcessIdentity[] = [{ pid: 42, startTime: "100" }];
   expect(supervisorAlive({ pid: 42, startTime: "100", surface: "library" }, snapshot)).toBe(true);
@@ -185,12 +194,15 @@ test("withFleetLock creates, releases, and times out with E_INTERNAL when the ho
   await expect(withFleetLock(() => { throw new Error("boom"); })).rejects.toThrow("boom");
   expect(fs.existsSync(lockPath)).toBe(false);
   fs.mkdirSync(fleetDir(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startTime: "1" }));
+  // A holder with this process's real identity is alive: waiting past the 500 ms liveness check must not take it over.
+  const self = processSnapshot().find((item) => item.pid === process.pid);
+  expect(self).toBeDefined();
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startTime: self!.startTime }));
   let ran = false, caught: unknown; const startedAt = Date.now();
-  try { await withFleetLock(() => { ran = true; }, { timeoutMs: 120 }); } catch (error) { caught = error; }
+  try { await withFleetLock(() => { ran = true; }, { timeoutMs: 800 }); } catch (error) { caught = error; }
   expect(caught).toBeInstanceOf(FleetError); expect((caught as FleetError).code).toBe("E_INTERNAL");
   expect((caught as FleetError).message).toBe("Fleet lock timeout"); expect(ran).toBe(false);
-  expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100); expect(fs.existsSync(lockPath)).toBe(true);
+  expect(Date.now() - startedAt).toBeGreaterThanOrEqual(700); expect(fs.existsSync(lockPath)).toBe(true);
 });
 
 test("withFleetLock takes over a stale lock naming a dead pid and start time", async () => {
