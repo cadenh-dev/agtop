@@ -75,6 +75,17 @@ test("foldEvents ignores a log without seq 1 or without a record", () => {
   const base = makeRecord("missing");
   expect(foldEvents([{ seq: 2, timestamp: base.createdAt, jobId: base.jobId, type: "state", state: "starting", previous: "queued", reason: "admitted", record: base }])).toBeUndefined();
   expect(foldEvents([{ seq: 1, timestamp: base.createdAt, jobId: base.jobId, type: "state", state: "queued", previous: null, reason: "submitted" }])).toBeUndefined();
+  // Sequence rule 2: seq 1 must be the queued/submitted event.
+  expect(foldEvents([{ seq: 1, timestamp: base.createdAt, jobId: base.jobId, type: "state", state: "running", previous: null, reason: "spawned", record: base }])).toBeUndefined();
+});
+
+test("apply keeps the highest lastSeq when a patch carries an older one", () => {
+  const index = new JobIndex(store, { readV1: () => [] }); index.rebuild();
+  const base = makeRecord("older-patch");
+  index.apply({ seq: 1, timestamp: base.createdAt, jobId: base.jobId, type: "state", state: "queued", previous: null, reason: "submitted", record: base });
+  index.apply({ seq: 9, timestamp: base.createdAt, jobId: base.jobId, type: "policy", decision: "defer", rule: "gpu-busy", measured: 90, threshold: 85, detail: "" });
+  index.apply({ seq: 10, timestamp: base.createdAt, jobId: base.jobId, type: "state", state: "starting", previous: "queued", reason: "admitted", patch: { lastSeq: 4 } });
+  expect(index.get("older-patch")!.lastSeq).toBe(10);
 });
 
 test("migrateV1Record maps every field and omits absent containment optionals", () => {

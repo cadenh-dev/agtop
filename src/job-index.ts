@@ -8,7 +8,7 @@ import type { CaptureSpec, JobContainment, JobEvent, JobOwner, JobRecord, JobRec
 /** Folds lifecycle events into a record. Returns undefined when seq 1 is missing or carries no record. */
 export function foldEvents(events: JobEvent[]): JobRecordV2 | undefined {
   const first = events[0];
-  if (first === undefined || first.seq !== 1 || first.type !== "state" || first.record === undefined) return undefined;
+  if (first === undefined || first.seq !== 1 || first.type !== "state" || first.state !== "queued" || first.record === undefined) return undefined;
   // Start from a copy of the submission record: a fold never mutates its input events.
   let record: JobRecordV2 = { ...first.record }, highestSeq = 0, highestPatchLastSeq = 0;
   for (const event of events) {
@@ -105,7 +105,8 @@ export class JobIndex {
     const ids = new Set(this.store.listJobIds());
     for (const jobId of ids) {
       const size = logSize(eventsFile(this.store, jobId));
-      if (this.fleet.has(jobId) && this.sizes.get(jobId) === size) continue;
+      // Unchanged size: skip, including directories that had no valid seq 1 last time.
+      if (this.sizes.get(jobId) === size) continue;
       const read = this.store.readAllEvents(jobId);
       this.sizes.set(jobId, size);
       const record = foldEvents(read.events);
@@ -128,9 +129,10 @@ export class JobIndex {
         return;
       }
       if (existing === undefined) return;
+      const previousLastSeq = existing.lastSeq; // the patch may carry an older lastSeq
       existing.state = event.state; existing.stateReason = event.reason;
       if (event.patch !== undefined) Object.assign(existing, event.patch);
-      existing.lastSeq = Math.max(existing.lastSeq, event.seq, event.patch?.lastSeq ?? 0);
+      existing.lastSeq = Math.max(previousLastSeq, event.seq, event.patch?.lastSeq ?? 0);
       return;
     }
     if (existing !== undefined) existing.lastSeq = Math.max(existing.lastSeq, event.seq);
