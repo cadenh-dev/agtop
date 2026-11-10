@@ -10,6 +10,7 @@ import {
   hardenWindowsAcl,
   writePrivateFileAtomic,
 } from "../src/secure-fs.js";
+import { readAudit } from "../src/audit.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -105,5 +106,21 @@ describe.skipIf(!IS_WINDOWS)("Windows ACL hardening", () => {
     expect(output).not.toMatch(/Everyone/i);
     expect(output).not.toMatch(/BUILTIN\\Users/i);
     expect(output).not.toMatch(/Authenticated Users/i);
+  });
+
+  test("a hardening failure is audited once and does not throw", () => {
+    const saved = { domain: process.env.USERDOMAIN, name: process.env.USERNAME };
+    process.env.USERDOMAIN = "AGTOPNODOMAIN";
+    process.env.USERNAME = "agtop-no-such-user";
+    const dir = path.join(stateDir, "fleet", "jobs", "acl-fail");
+    try {
+      expect(() => ensurePrivateDir(dir)).not.toThrow();
+      ensurePrivateDir(dir); // cached: no second record
+    } finally {
+      if (saved.domain === undefined) delete process.env.USERDOMAIN; else process.env.USERDOMAIN = saved.domain;
+      if (saved.name === undefined) delete process.env.USERNAME; else process.env.USERNAME = saved.name;
+    }
+    const records = readAudit().filter((r) => r.event === "acl-hardening-failed" && r.detail?.includes("acl-fail"));
+    expect(records.length).toBe(1);
   });
 });

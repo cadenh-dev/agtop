@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import { audit } from "./audit.js";
 
 /** Directories hardened once per process, keyed by resolved path. */
 const HARDENED_DIRS = new Set<string>();
@@ -12,8 +13,13 @@ export function ensurePrivateDir(dir: string): void {
   if (process.platform === "win32") {
     const key = path.resolve(dir);
     if (HARDENED_DIRS.has(key)) return;
+    // Marked before auditing: audit() calls ensurePrivateDir(fleetDir()), which then returns early.
     HARDENED_DIRS.add(key);
-    hardenWindowsAcl(dir);
+    const result = hardenWindowsAcl(dir);
+    if (!result.ok) {
+      process.stderr.write(`agtop: could not restrict access to ${dir}; using inherited permissions\n`);
+      audit({ event: "acl-hardening-failed", actor: "admin", detail: `${dir}: ${result.message ?? "icacls failed"}` });
+    }
     return;
   }
   fs.chmodSync(dir, 0o700);
@@ -23,6 +29,8 @@ export function ensurePrivateDir(dir: string): void {
 export function writePrivateFileAtomic(file: string, data: string | Buffer): void {
   const temp = `${file}.${process.pid}.tmp`;
   try {
+    // A stale temp (PID reuse) would keep its old mode; remove it so the file is created 0600.
+    fs.rmSync(temp, { force: true });
     fs.writeFileSync(temp, data, { mode: 0o600 });
     fs.renameSync(temp, file);
   } catch (error) {
@@ -71,6 +79,7 @@ export function hardenWindowsAcl(target: string): { ok: boolean; message?: strin
     execFileSync("icacls.exe", [target, "/inheritance:r", "/grant:r", `${user}:${rights}`], {
       windowsHide: true,
       timeout: 5000,
+      stdio: ["ignore", "pipe", "pipe"],
     });
     return { ok: true };
   } catch (error) {
