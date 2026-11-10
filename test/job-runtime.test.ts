@@ -184,6 +184,22 @@ test("kill(\"cancelled\") on a running job records kill-requested, not cancelled
   expect(store.readAllEvents(jobId).events.some((event) => event.type === "state" && event.reason === "cancelled")).toBe(false);
 });
 
+test("start() makes starting durable synchronously but spawns only after a macrotask (L8)", async () => {
+  let spawned = false;
+  const agent = fakeAgent();
+  const spawn = (async () => { spawned = true; return agent; }) as typeof import("../src/manager.js").spawnContainedAgent;
+  const { store, runtime } = setup({ spawn });
+  const jobId = "spawn-after-lock";
+  runtime.enqueue(recordFor(jobId, { capture: NO_CAPTURE }), {});
+  const started = runtime.start(jobId);
+  expect(states(store, jobId)).toEqual(["queued", "starting"]);
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+  expect(spawned).toBe(false);
+  await started;
+  expect(spawned).toBe(true);
+  await runtime.kill(jobId, "kill-requested");
+});
+
 test("fail() records a queued job as failed and fires afterTerminal", () => {
   const finished: string[] = [];
   const { index, runtime } = setup({ hooks: { afterTerminal: (record) => finished.push(`${record.state}:${record.stateReason}`) } });

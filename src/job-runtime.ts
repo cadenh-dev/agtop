@@ -200,6 +200,10 @@ export class JobRuntime {
 
   private async launch(run: JobRun): Promise<JobRecordV2> {
     this.apply(run, run.writer.appendState("starting", "admitted"));
+    // L8 / D26: starting is durable synchronously, but capture and spawn wait one macrotask. The
+    // scheduler calls start() last inside withFleetLock, whose release runs in microtasks, so the
+    // fleet lock is always gone before any process is created.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const capture = run.record.capture.kind !== "none";
     let session: CaptureSession | undefined;
     let agent: ManagedAgent | undefined;
