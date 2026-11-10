@@ -265,12 +265,20 @@ for (let i = 0; i < ports.length; i++) {
 }
 scheduler.start();
 void scheduler.tick().catch(() => undefined);
-setTimeout(() => {
+// Exit once this child's own jobs are terminal (deadline 20 s) instead of after a fixed window,
+// so a slow CI runner cannot cut the run short.
+const ownTerminal = (): boolean => index.list().filter((record) => record.owner.sessionId === "s-" + label)
+  .every((record) => ["exited", "failed", "killed", "lost"].includes(record.state));
+const deadline = Date.now() + 20000;
+const poll = setInterval(() => {
+  index.refresh();
+  if (!ownTerminal() && Date.now() < deadline) return;
+  clearInterval(poll);
   scheduler.stop();
   index.refresh();
   fs.appendFileSync(journal, JSON.stringify({ type: "done", label, states: index.list().map((record) => [record.jobId, record.state]) }) + "\\n");
   process.exit(0);
-}, 2600);
+}, 50);
 `;
 }
 function runChild(script: string, label: string, journal: string): Promise<{ code: number | null; stderr: string }> {
