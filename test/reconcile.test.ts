@@ -86,6 +86,16 @@ for (const state of ["queued", "starting", "running", "exiting"] as const) {
   });
 }
 
+test("a job submitted after the snapshot was taken is never marked lost", async () => {
+  const store = new EventStore(), index = new JobIndex(store, { readV1: () => [] });
+  const snapshotTime = new Date(Date.now() - 60_000);
+  // Its supervisor started after the snapshot, so it is missing from it; it must not count as dead.
+  createJob("late-job", "running", DEAD, { createdAt: new Date(snapshotTime.getTime() + 1_000).toISOString() });
+  const stats = await reconcileFleet(store, index, { snapshot: () => [], kill: noKill, now: () => snapshotTime });
+  expect(stats.lost).toEqual([]);
+  expect(lastStateEvent("late-job").state).toBe("running");
+});
+
 test("a live supervisor is untouched: no lost state and no tail truncation", async () => {
   const store = new EventStore(), index = new JobIndex(store, { readV1: () => [] }); createJob("live-job", "running", LIVE);
   const eventsFile = path.join(jobDir("live-job"), "events.jsonl"); appendTornTail(eventsFile);

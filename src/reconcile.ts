@@ -155,6 +155,8 @@ export async function reconcileFleet(store: EventStore, index: JobIndex, options
   const startedAt = Date.now(), now = options?.now ?? (() => new Date());
   const stats: ReconcileStats = { ...index.rebuild(), lost: [], repaired: [], pruned: [], killedPids: [] };
   let snapshot: ProcessIdentity[];
+  // A supervisor that started after the snapshot is missing from it; its jobs were created later.
+  const snapshotAt = now().getTime();
   try {
     snapshot = (options?.snapshot ?? processSnapshot)(); rememberSelf(snapshot);
   } catch (error) {
@@ -170,6 +172,7 @@ export async function reconcileFleet(store: EventStore, index: JobIndex, options
       if (record === undefined) continue;
       records.push(record);
       if (isTerminal(record.state) || supervisorAlive(record.supervisor, snapshot) || isThisProcess(record.supervisor)) continue;
+      if (Date.parse(record.createdAt) > snapshotAt) continue; // cannot prove dead: submitted after the snapshot
       if (store.repair(jobId).corruptTailBytes > 0) stats.repaired.push(jobId);
       let detail = `supervisor lost while job was ${record.state}`;
       if (RUNNING_STATES.has(record.state)) {
