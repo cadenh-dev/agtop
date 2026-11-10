@@ -5,77 +5,77 @@
   "cpus": 16,
   "cpu": "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz",
   "node": {
-    "captureMs": 145,
-    "throughputMiBps": 69,
+    "captureMs": 161,
+    "throughputMiBps": 62.1,
     "tailLatencyIdleMs": {
       "n": 300,
-      "p50": 0.11,
-      "p95": 0.19,
-      "max": 2.04
+      "p50": 0.12,
+      "p95": 0.2,
+      "max": 1.2
     },
     "tailLatencyDuringBurstMs": {
-      "n": 198,
-      "p50": 0.08,
-      "p95": 1.76,
-      "max": 4.85
+      "n": 196,
+      "p50": 0.09,
+      "p95": 2.12,
+      "max": 6.66
     },
     "rssMiB": {
-      "idle": 40.6,
-      "afterBurst": 78.7
-    },
-    "ringChunks": 18,
-    "fleet20": {
-      "rssBeforeMiB": 41,
-      "rssAtCompletionMiB": 124.5,
-      "transientOverheadMiB": 83.6,
-      "rssSettledMiB": 71.5,
-      "settledOverheadMiB": 30.6,
-      "heapUsedSettledMiB": 22.1,
-      "list": {
-        "n": 20,
-        "p50": 0.44,
-        "p95": 0.62,
-        "max": 0.68
-      }
-    },
-    "restartMs": 48,
-    "recoveryMs": 20
-  },
-  "winjob": {
-    "captureMs": 175,
-    "throughputMiBps": 57.2,
-    "tailLatencyIdleMs": {
-      "n": 300,
-      "p50": 0.11,
-      "p95": 0.18,
-      "max": 5.02
-    },
-    "tailLatencyDuringBurstMs": {
-      "n": 304,
-      "p50": 0.11,
-      "p95": 1.42,
-      "max": 7.24
-    },
-    "rssMiB": {
-      "idle": 45.1,
-      "afterBurst": 76.3
+      "idle": 40.5,
+      "afterBurst": 83.4
     },
     "ringChunks": 17,
     "fleet20": {
-      "rssBeforeMiB": 45.1,
-      "rssAtCompletionMiB": 123.7,
-      "transientOverheadMiB": 78.6,
-      "rssSettledMiB": 74.8,
-      "settledOverheadMiB": 29.7,
-      "heapUsedSettledMiB": 22.4,
+      "rssBeforeMiB": 41,
+      "rssAtCompletionMiB": 114.6,
+      "transientOverheadMiB": 73.6,
+      "rssSettledMiB": 71.4,
+      "settledOverheadMiB": 30.5,
+      "heapUsedSettledMiB": 22,
       "list": {
         "n": 20,
-        "p50": 0.44,
-        "p95": 0.56,
-        "max": 0.56
+        "p50": 0.39,
+        "p95": 0.57,
+        "max": 0.71
       }
     },
-    "restartMs": 64,
-    "recoveryMs": 21.5
+    "restartMs": 53,
+    "recoveryMs": 23.9
+  },
+  "winjob": {
+    "captureMs": 173,
+    "throughputMiBps": 57.7,
+    "tailLatencyIdleMs": {
+      "n": 300,
+      "p50": 0.11,
+      "p95": 0.2,
+      "max": 5.34
+    },
+    "tailLatencyDuringBurstMs": {
+      "n": 326,
+      "p50": 0.11,
+      "p95": 1.02,
+      "max": 6.56
+    },
+    "rssMiB": {
+      "idle": 45,
+      "afterBurst": 81.8
+    },
+    "ringChunks": 18,
+    "fleet20": {
+      "rssBeforeMiB": 45,
+      "rssAtCompletionMiB": 113.8,
+      "transientOverheadMiB": 68.7,
+      "rssSettledMiB": 74.8,
+      "settledOverheadMiB": 29.8,
+      "heapUsedSettledMiB": 22.5,
+      "list": {
+        "n": 20,
+        "p50": 0.4,
+        "p95": 0.7,
+        "max": 0.91
+      }
+    },
+    "restartMs": 66,
+    "recoveryMs": 22.1
   }
 }

@@ -12,6 +12,7 @@ const providers = process.platform === "win32" ? ["node", "winjob"] : ["node"];
 const results: Record<string, unknown> = { platform: process.platform, arch: process.arch, bun: Bun.version, cpus: os.cpus().length, cpu: os.cpus()[0]?.model };
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agtop-spike-"));
 afterAll(() => {
+  console.log("SPIKE_RESULTS " + JSON.stringify(results));
   fs.writeFileSync(path.resolve(import.meta.dir, `results-${process.platform}.json`), JSON.stringify(results, null, 2) + "\n");
   fs.rmSync(temp, { recursive: true, force: true });
 });
