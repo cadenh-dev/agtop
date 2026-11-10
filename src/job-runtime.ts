@@ -125,7 +125,10 @@ export class JobRuntime {
   start(jobId: string): Promise<JobRecordV2> {
     const run = this.runs.get(jobId);
     if (run === undefined) return Promise.reject(new Error(`Unknown job ${jobId}.`));
-    return run.startPromise ??= this.launch(run);
+    if (run.startPromise !== undefined) return run.startPromise;
+    // A queued job cancelled or failed before admission must not reach launch().
+    if (run.record.state !== "queued") return Promise.reject(new Error(`Job ${jobId} is not queued (state: ${run.record.state}).`));
+    return run.startPromise = this.launch(run);
   }
 
   /** Cancels a queued job or terminates a live one (rows 7, 9 and 11). */
@@ -275,7 +278,7 @@ export class JobRuntime {
     if (run.readers.length > 0) await Promise.all(run.readers.map((reader) => reader.done));
     if (run.finalized) return run.record;
     const marker = readKillRequest(run.jobId);
-    const reason = run.killReason ?? marker?.reason;
+    const reason = run.killReason ?? (marker?.reason === "cancelled" ? "kill-requested" : marker?.reason);
     const errors = run.containmentErrors.length > 0 ? run.containmentErrors.join("; ") : undefined;
     this.apply(run, run.writer.appendExit({
       exitCode: run.exitCode, signal: null, durationMs: Math.max(0, this.now() - run.startedAtMs),
@@ -300,10 +303,12 @@ export class JobRuntime {
       await run.startPromise?.catch(() => undefined);
       if (isTerminal(run.record.state)) return null;
     }
-    run.killReason ??= reason;
+    // "cancelled" is a queued-only reason (row 11); a live job is killed for kill-requested (row 7).
+    const liveReason = reason === "cancelled" ? "kill-requested" : reason;
+    run.killReason ??= liveReason;
     if (detail !== undefined) run.killDetail = detail;
     const terminating = run.record.state === "running";
-    if (terminating) this.apply(run, run.writer.appendState("exiting", reason, undefined, detail?.slice(0, 500)));
+    if (terminating) this.apply(run, run.writer.appendState("exiting", liveReason, undefined, detail?.slice(0, 500)));
     let result: KillResult | null = null;
     if (terminating && run.agent !== undefined) {
       try {

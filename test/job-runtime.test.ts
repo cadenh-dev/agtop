@@ -161,6 +161,29 @@ test("kill of a queued job is killed/cancelled without spawning", async () => {
   expect(await runtime.kill(jobId, "cancelled")).toBeNull();
 });
 
+test("start() on a job cancelled while queued rejects without launching or firing hooks", async () => {
+  const calls: string[] = [];
+  const { store, runtime } = setup({ spawn: spawnOf(fakeAgent()), hooks: { beforeTerminal: (id) => calls.push(`before:${id}`) } });
+  const jobId = "cancelled-then-started";
+  runtime.enqueue(recordFor(jobId, { capture: NO_CAPTURE }), {});
+  await runtime.kill(jobId, "cancelled");
+  await expect(runtime.start(jobId)).rejects.toThrow("not queued");
+  expect(states(store, jobId)).toEqual(["queued", "killed"]);
+  expect(calls).toEqual([]);
+});
+
+test("kill(\"cancelled\") on a running job records kill-requested, not cancelled", async () => {
+  const agent = fakeAgent((finish) => { finish(1); return { killedPids: [7], failedPids: [], errors: [] }; });
+  const { store, runtime } = setup({ spawn: spawnOf(agent) });
+  const jobId = "cancel-running";
+  runtime.enqueue(recordFor(jobId, { capture: NO_CAPTURE }), {});
+  await runtime.start(jobId);
+  await runtime.kill(jobId, "cancelled");
+  const final = await runtime.wait(jobId);
+  expect(final.state).toBe("killed"); expect(final.stateReason).toBe("kill-requested");
+  expect(store.readAllEvents(jobId).events.some((event) => event.type === "state" && event.reason === "cancelled")).toBe(false);
+});
+
 test("fail() records a queued job as failed and fires afterTerminal", () => {
   const finished: string[] = [];
   const { index, runtime } = setup({ hooks: { afterTerminal: (record) => finished.push(`${record.state}:${record.stateReason}`) } });
