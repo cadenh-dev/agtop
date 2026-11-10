@@ -83,7 +83,7 @@ describe("PipeStreamReader", () => {
     source.write("first line\n");
     const interval = setInterval(() => source.write("trickle\n"), 5);
     const started = Date.now();
-    await waitFor(() => output().length > 0, 250);
+    await waitFor(() => output().length > 0, 1000);
     expect(Date.now() - started).toBeLessThan(250);
     clearInterval(interval);
     source.end();
@@ -168,6 +168,33 @@ describe("PipeStreamReader", () => {
     const text = output().toString("utf8");
     expect(text).toContain("key=[REDACTED:openai-key]\n");
     expect(text).not.toContain("sk-a");
+  });
+
+  test("a slow trickle without newlines never releases a half-arrived secret", async () => {
+    const source = new PassThrough();
+    let offset = 0;
+    const { reader, output } = capture(source, { redactor: new SecretRedactor(), now: () => Date.now() + offset });
+    // One byte per 50 ms of (fake) time: never stalled, never fills the 1 KiB holdback.
+    for (const char of "x".repeat(38) + "key=sk-" + "a".repeat(25)) {
+      source.write(char);
+      offset += 50;
+      await sleep(5);
+    }
+    source.write("\n");
+    source.end();
+    await reader.done;
+    const text = output().toString("utf8");
+    expect(text).toBe("x".repeat(38) + "key=[REDACTED:openai-key]\n");
+  });
+
+  test("a source error finishes the reader with the buffered data", async () => {
+    const source = new PassThrough();
+    const { reader, output } = capture(source);
+    source.write("partial before error");
+    await sleep(10);
+    source.emit("error", new Error("simulated pipe error"));
+    await reader.done;
+    expect(output().toString("utf8")).toBe("partial before error");
   });
 });
 

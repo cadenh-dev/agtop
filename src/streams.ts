@@ -44,7 +44,8 @@ export class PipeStreamReader {
   private pendingBytes = 0;
   private inBytes = 0;
   private outBytes = 0;
-  private heldSince: number | null = null;
+  /** When the source last delivered data; the MAX_HOLD_MS release fires only after a stall. */
+  private lastDataAt: number | null = null;
   private finished = false;
   private drainedFlag = true;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -95,6 +96,7 @@ export class PipeStreamReader {
   private readonly onData = (data: Buffer): void => {
     if (this.finished) return;
     this.inBytes += data.length;
+    this.lastDataAt = this.now();
     this.feed(data, "data");
     if (this.pendingBytes >= MIN_CHUNK_BYTES) this.emit(false, false);
   };
@@ -106,9 +108,13 @@ export class PipeStreamReader {
   private readonly onTick = (): void => {
     if (this.finished) return;
     const redactor = this.options.redactor;
-    // An unterminated line (a prompt) would be held forever by the redactor;
-    // release it through EOF once it has been held longer than MAX_HOLD_MS.
-    const mode = redactor && this.heldSince !== null && this.now() - this.heldSince > MAX_HOLD_MS ? "eof" : "tick";
+    // An unterminated line (a prompt) would be held forever by the redactor. Release it through
+    // EOF only when the stream has stalled: no data for MAX_HOLD_MS while bytes are held. Timing
+    // the release from when holding began instead leaks half-arrived secrets under continuous
+    // output and under slow trickles that never fill the 1 KiB holdback.
+    const stalled = redactor !== null && redactor.heldBytes > 0 && this.lastDataAt !== null
+      && this.now() - this.lastDataAt > MAX_HOLD_MS;
+    const mode = stalled ? "eof" : "tick";
     this.feed(EMPTY, mode);
     this.emit(true, false);
   };
@@ -119,13 +125,6 @@ export class PipeStreamReader {
     if (safe.length > 0) {
       this.pending.push(safe);
       this.pendingBytes += safe.length;
-    }
-    if (redactor) {
-      // The hold clock measures a stall: it restarts whenever the redactor releases bytes.
-      // Under continuous output the carry is never empty, so restarting only on empty would
-      // switch every tick to "eof" after MAX_HOLD_MS and release half-arrived secrets.
-      if (redactor.heldBytes === 0) this.heldSince = null;
-      else if (this.heldSince === null || safe.length > 0) this.heldSince = this.now();
     }
   }
 
