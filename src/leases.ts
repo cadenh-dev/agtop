@@ -14,6 +14,11 @@ const MIN_PORT = 1, MAX_PORT = 65_535, MIN_TTL_MS = 10_000, MAX_TTL_MS = 86_400_
 const SNAPSHOT_TTL_MS = 5_000;
 /** Retries for a lease file that exists but is not readable yet (contracts 8.1). */
 const UNREADABLE_RETRIES = 20, UNREADABLE_RETRY_MS = 5;
+/** An unreadable lease file younger than this may be a winner still writing; never delete it. */
+const UNREADABLE_STALE_MS = 2000;
+function olderThan(file: string, ms: number, nowMs: number): boolean {
+  try { return nowMs - fs.statSync(file).mtimeMs >= ms; } catch { return false; }
+}
 
 function isPort(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= MIN_PORT && value <= MAX_PORT;
@@ -82,7 +87,7 @@ export class LeaseManager {
       const winner = this.read(port);
       if (winner !== null) throw conflict(port, leaseHolder(winner));
       if (attempt < UNREADABLE_RETRIES) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UNREADABLE_RETRY_MS); continue; }
-      fs.rmSync(file, { force: true });
+      if (olderThan(file, UNREADABLE_STALE_MS, Date.now())) fs.rmSync(file, { force: true });
       if (attempt >= UNREADABLE_RETRIES * 2) throw new FleetError("E_INTERNAL", `Lease file for port ${port} is unreadable`);
     }
   }
@@ -134,7 +139,8 @@ export class LeaseManager {
     const lease = this.live(port);
     if (lease !== null && lease.jobId !== forJobId) return leaseHolder(lease);
     for (const listener of this.listeners()) {
-      if (listener.port !== port || listener.jobId === forJobId) continue;
+      // Without a job, every listener conflicts (an unrelated process with no jobId must not match "no job").
+      if (listener.port !== port || (forJobId !== undefined && listener.jobId === forJobId)) continue;
       return { kind: "listener", port, pid: listener.pid, address: listener.address,
         ...(listener.jobId === undefined ? {} : { jobId: listener.jobId }), ...(listener.peer === undefined ? {} : { peer: listener.peer }) };
     }
@@ -146,6 +152,8 @@ export class LeaseManager {
     const nowMs = this.now(), ports: number[] = [];
     for (const entry of this.entries()) {
       if (entry.lease !== null && !this.isDead(entry.lease, nowMs)) continue;
+      // A young unreadable file may be a lease another process is still writing.
+      if (entry.lease === null && !olderThan(this.file(entry.port), UNREADABLE_STALE_MS, Date.now())) continue;
       try {
         fs.rmSync(this.file(entry.port), { force: true });
         ports.push(entry.port);

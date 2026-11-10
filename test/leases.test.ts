@@ -102,6 +102,8 @@ test("a listener on the port conflicts unless it belongs to the same job", () =>
   expect(conflict.details?.holder).toEqual({ kind: "listener", port: 3300, pid: 999, address: "127.0.0.1", jobId: "job-b" });
   listeners.push({ pid: 1000, address: "0.0.0.0", port: 3302 });
   expect(m.check(3302, "job-a")).toEqual({ kind: "listener", port: 3302, pid: 1000, address: "0.0.0.0" });
+  // A lease with no job (POST /v1/leases) must still see an unrelated listener that has no jobId.
+  expect(m.check(3302)).toEqual({ kind: "listener", port: 3302, pid: 1000, address: "0.0.0.0" });
   expect(m.check(3300)).not.toBeNull();
   expect(m.get(3300)).toBeNull();
 });
@@ -140,7 +142,12 @@ test("releaseJob and sweep delete only the files they own and return sorted port
   expect(m.releaseJob("job-none")).toEqual([]);
   expect(fs.existsSync(path.join(dir, "3503.json"))).toBe(true);
   clock += 10_001;
-  expect(m.sweep()).toEqual([3503, 3600, 3601]);
+  // A fresh unreadable file may be a lease still being written: sweep leaves it alone.
+  expect(m.sweep()).toEqual([3600, 3601]);
+  expect(fs.existsSync(path.join(dir, "3503.json"))).toBe(true);
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(dir, "3503.json"), old, old);
+  expect(m.sweep()).toEqual([3503]);
   expect(fs.existsSync(path.join(dir, "3503.json"))).toBe(false);
   expect(fs.existsSync(path.join(dir, "3500.json"))).toBe(true);
   expect(m.sweep()).toEqual([]);
