@@ -30,7 +30,7 @@ export function watchdogCommand(pgid: number, jobId: string, options: {
   const compiled = moduleUrl.includes("/$bunfs/") || moduleUrl.includes("~BUN") || !exists(script);
   const command = options.execPath ?? process.execPath;
   const env = { ...process.env };
-  for (const key of ["AGTOP_JOB_ID", "AGTOP_HARNESS", "AGTOP_PEER", "AGTOP_WORKTREE", "AGTOP_BACKEND", "AGTOP_DAEMON_TOKEN"]) delete env[key];
+  for (const key of ["AGTOP_JOB_ID", "AGTOP_HARNESS", "AGTOP_PEER", "AGTOP_WORKTREE", "AGTOP_BACKEND", "AGTOP_DAEMON_TOKEN", "AGTOP_OWNER_TOKEN", "AGTOP_SESSION_ID"]) delete env[key];
   if (options.electron ?? Boolean(process.versions.electron)) env.ELECTRON_RUN_AS_NODE = "1";
   return {
     command,

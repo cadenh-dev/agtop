@@ -123,7 +123,8 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
   for (const key of ["cwd", "userOrPeer", "lemonadeUrl", "cgroupRoot"] as const) {
     if (opts[key] !== undefined && typeof opts[key] !== "string") throw new Error(`${key} must be a string.`);
   }
-  if (opts.stdio !== undefined && !["inherit", "ignore"].includes(opts.stdio)) throw new Error("stdio must be inherit or ignore.");
+  if (opts.stdio !== undefined && !["inherit", "ignore", "capture"].includes(opts.stdio)) throw new Error("stdio must be inherit, ignore, or capture.");
+  if (opts.stdio === "capture" && opts.captureSession === undefined) throw new Error("captureSession is required when stdio is capture.");
   if (opts.useLemonadeLocal !== undefined && typeof opts.useLemonadeLocal !== "boolean") throw new Error("useLemonadeLocal must be a boolean.");
   if (opts.extraEnv !== undefined && (!opts.extraEnv || typeof opts.extraEnv !== "object" || Array.isArray(opts.extraEnv))) throw new Error("extraEnv must be a string map.");
   const id = opts.jobId ?? randomUUID(); validateJobId(id);
@@ -139,6 +140,8 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
   // Do not inherit another manager's backend label.
   delete env.AGTOP_BACKEND;
   delete env.AGTOP_DAEMON_TOKEN;
+  delete env.AGTOP_OWNER_TOKEN;
+  delete env.AGTOP_SESSION_ID;
   if (opts.useLemonadeLocal) {
     const base = lemonadeBase(opts.lemonadeUrl);
     const api = /\/v1$/.test(base) ? base : `${base}/v1`;
@@ -155,17 +158,23 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
     mode: process.platform === "win32" ? "win32-job-object" : posix!.fallbackMode, createdAt: new Date().toISOString() };
   if (process.platform === "win32") {
     let native: ReturnType<ReturnType<typeof windowsApi>["launch"]> | undefined;
+    const session = opts.stdio === "capture" ? opts.captureSession : undefined;
     try {
       record.jobName = `Local\\agtop-${randomUUID()}`;
-      native = windowsApi().launch(record.jobName, command, args, cwd, env, opts.stdio === "inherit");
-      record.rootPid = native.pid; record.startTime = native.startTime; writeJob(record); native.resume();
+      native = windowsApi().launch(record.jobName, command, args, cwd, env, session ? session.windowsHandles() : opts.stdio === "inherit");
+      record.rootPid = native.pid; record.startTime = native.startTime;
+      const output = session?.attach();
+      session?.releaseChildEnds();
+      writeJob(record); native.resume();
       const handle = native;
       const exited = (async () => {
         try { while (true) { const code = handle.poll(); if (code !== undefined) { handle.kill(); return code; } await delay(100); } }
         finally { handle.close(); release(); }
       })();
-      return { jobId: id, pid: record.rootPid, containmentMode: record.mode, exited, terminate: () => killAgentTree(id) };
+      return { jobId: id, pid: record.rootPid, containmentMode: record.mode, exited, terminate: () => killAgentTree(id),
+        output, startTime: record.startTime, jobName: record.jobName };
     } catch (e) {
+      session?.dispose();
       try { if (native) try { native.kill(); } finally { native.close(); } }
       finally { release(); }
       throw e;
@@ -174,7 +183,9 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
   let child: ReturnType<typeof spawn> | undefined;
   let watchdog: ReturnType<typeof spawn> | undefined;
   let watchdogPipe: Writable | undefined;
+  let output: ManagedAgent["output"];
   try {
+    const session = opts.stdio === "capture" ? opts.captureSession : undefined;
     const cgroupRoot = process.platform === "linux" ? opts.cgroupRoot ?? process.env.AGTOP_CGROUP_ROOT : undefined;
     if (cgroupRoot) {
       const root = fs.realpathSync(cgroupRoot);
@@ -185,7 +196,10 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
       record.mode = "linux-cgroup";
     }
     // A separate pipe gates exec without consuming the harness's stdin.
-    child = spawn("/bin/sh", ["-c", 'read -r gate <&3 || exit 125; exec 3<&-; exec "$@"', "agtop-launch", command, ...args], { cwd, env, detached: true, stdio: [opts.stdio === "inherit" ? "inherit" : "ignore", opts.stdio === "inherit" ? "inherit" : "ignore", opts.stdio === "inherit" ? "inherit" : "ignore", "pipe"] });
+    child = spawn("/bin/sh", ["-c", 'read -r gate <&3 || exit 125; exec 3<&-; exec "$@"', "agtop-launch", command, ...args], { cwd, env, detached: true, stdio: session
+      ? [...session.posixStdio(), "pipe"]
+      : [opts.stdio === "inherit" ? "inherit" : "ignore", opts.stdio === "inherit" ? "inherit" : "ignore", opts.stdio === "inherit" ? "inherit" : "ignore", "pipe"] });
+    output = session?.attach(child);
     const launched = child;
     const rawExit = new Promise<number>((resolve, reject) => { launched.once("error", reject); launched.once("exit", (code, signal) => resolve(code ?? (signal ? 128 + (os.constants.signals[signal] || 1) : 1))); });
     // Observe errors even if setup fails before returning the public promise.
@@ -224,8 +238,10 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
         }
         return result;
       },
+      output, startTime: record.startTime, ...(record.cgroupPath ? { cgroupPath: record.cgroupPath } : {}),
     };
   } catch (e) {
+    if (opts.stdio === "capture") opts.captureSession?.dispose();
     child?.kill("SIGKILL");
     (child?.stdio[3] as Writable | null | undefined)?.destroy();
     watchdogPipe?.end(); watchdog?.kill("SIGKILL"); release();
