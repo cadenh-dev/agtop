@@ -19,6 +19,25 @@ const UNREADABLE_STALE_MS = 2000;
 function olderThan(file: string, ms: number, nowMs: number): boolean {
   try { return nowMs - fs.statSync(file).mtimeMs >= ms; } catch { return false; }
 }
+/**
+ * Deletes `file` only if its contents still satisfy `matches`. Read-then-delete would let a slow
+ * process delete a lease another process just created, so the file is renamed aside first (only
+ * one process can move it), checked, and restored with link() (never overwrites) if it no longer
+ * matches. Same approach as the fleet lock takeover in reconcile.ts.
+ */
+function removeIf(file: string, matches: (raw: string) => boolean): boolean {
+  const aside = `${file}.gone.${process.pid}.${randomUUID()}`;
+  try { fs.renameSync(file, aside); } catch { return false; }
+  try {
+    if (matches(fs.readFileSync(aside, "utf8"))) return true;
+    try { fs.linkSync(aside, file); } catch { /* A newer lease exists; nothing to restore. */ }
+    return false;
+  } catch { return false; } finally { fs.rmSync(aside, { force: true }); }
+}
+const holdsLease = (leaseId: string) => (raw: string): boolean => {
+  try { return (JSON.parse(raw) as { leaseId?: unknown } | null)?.leaseId === leaseId; } catch { return false; }
+};
+const isUnparseable = (raw: string): boolean => { try { return parseLease(JSON.parse(raw)) === null; } catch { return true; } };
 
 function isPort(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= MIN_PORT && value <= MAX_PORT;
@@ -72,7 +91,7 @@ export class LeaseManager {
     const nowMs = this.now(), file = this.file(port);
     // A dead lease is absent; remove it before the check so the port can be taken again.
     const existing = this.read(port);
-    if (existing !== null && this.isDead(existing, nowMs)) fs.rmSync(file, { force: true });
+    if (existing !== null && this.isDead(existing, nowMs)) removeIf(file, holdsLease(existing.leaseId));
     const holder = this.check(port, request.jobId ?? undefined);
     if (holder !== null) throw conflict(port, holder);
     const at = new Date(nowMs).toISOString();
@@ -84,11 +103,14 @@ export class LeaseManager {
       if (createPrivateFileExclusive(file, data)) return lease;
       // Lost the race: the winner's lease is the holder. An unreadable file is either the winner
       // still writing (it is written right after creation) or garbage that sweep() would remove.
-      const winner = this.read(port);
+      const winner = this.live(port);
       if (winner !== null) throw conflict(port, leaseHolder(winner));
-      if (attempt < UNREADABLE_RETRIES) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UNREADABLE_RETRY_MS); continue; }
-      if (olderThan(file, UNREADABLE_STALE_MS, Date.now())) fs.rmSync(file, { force: true });
       if (attempt >= UNREADABLE_RETRIES * 2) throw new FleetError("E_INTERNAL", `Lease file for port ${port} is unreadable`);
+      // A dead winner, or old garbage, is removed only if it is still exactly that file.
+      const stale = this.read(port);
+      if (stale !== null && this.isDead(stale, this.now())) removeIf(file, holdsLease(stale.leaseId));
+      else if (stale === null && olderThan(file, UNREADABLE_STALE_MS, Date.now())) removeIf(file, isUnparseable);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UNREADABLE_RETRY_MS);
     }
   }
 
@@ -108,7 +130,7 @@ export class LeaseManager {
     const lease = this.live(port);
     if (lease === null) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${port}`);
     if (lease.leaseId !== leaseId) throw new FleetError("E_NOT_OWNER", `Lease ${leaseId} does not hold port ${port}`);
-    fs.rmSync(this.file(port), { force: true });
+    if (!removeIf(this.file(port), holdsLease(leaseId))) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${port}`);
   }
 
   /** Releases every lease of a job. Returns the ports. */
@@ -116,10 +138,7 @@ export class LeaseManager {
     const ports: number[] = [];
     for (const entry of this.entries()) {
       if (entry.lease === null || entry.lease.jobId !== jobId) continue;
-      try {
-        fs.rmSync(this.file(entry.port), { force: true });
-        ports.push(entry.port);
-      } catch { /* Another process released it first; the job holds nothing here. */ }
+      if (removeIf(this.file(entry.port), holdsLease(entry.lease.leaseId))) ports.push(entry.port);
     }
     return ports.sort((a, b) => a - b);
   }
@@ -154,10 +173,8 @@ export class LeaseManager {
       if (entry.lease !== null && !this.isDead(entry.lease, nowMs)) continue;
       // A young unreadable file may be a lease another process is still writing.
       if (entry.lease === null && !olderThan(this.file(entry.port), UNREADABLE_STALE_MS, Date.now())) continue;
-      try {
-        fs.rmSync(this.file(entry.port), { force: true });
-        ports.push(entry.port);
-      } catch { /* Already gone. */ }
+      const matches = entry.lease === null ? isUnparseable : holdsLease(entry.lease.leaseId);
+      if (removeIf(this.file(entry.port), matches)) ports.push(entry.port);
     }
     return ports.sort((a, b) => a - b);
   }
@@ -180,7 +197,10 @@ export class LeaseManager {
   /** The lease on disk, or null when absent or unparseable. Never throws. */
   private read(port: number): PortLease | null {
     if (!isPort(port)) return null;
-    try { return parseLease(JSON.parse(fs.readFileSync(this.file(port), "utf8"))); } catch { return null; }
+    try {
+      const lease = parseLease(JSON.parse(fs.readFileSync(this.file(port), "utf8")));
+      return lease !== null && lease.port === port ? lease : null; // a file's port must match its name
+    } catch { return null; }
   }
   /** The live lease on disk: absent, expired and dead-holder leases are all null. */
   private live(port: number): PortLease | null {

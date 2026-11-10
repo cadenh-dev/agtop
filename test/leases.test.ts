@@ -38,6 +38,41 @@ function writeRaw(port: number, content: string): string {
   return file;
 }
 
+async function raceTwenty(port: number): Promise<string[]> {
+  const source = pathToFileURL(path.join(REPO, "src", "leases.ts")).href;
+  const script = `const { LeaseManager } = await import(${JSON.stringify(source)});
+const start = Number(process.env.LEASE_START);
+while (Date.now() < start) {}
+try {
+  new LeaseManager({ dir: process.env.LEASE_DIR, alive: () => true }).acquire({ port: ${port}, jobId: process.env.LEASE_JOB,
+    peer: "tester", sessionId: "session", holder: { pid: 1, startTime: "1", surface: "library" } });
+  process.stdout.write("won");
+} catch (error) { process.stdout.write("lost:" + error.code); }`;
+  const start = Date.now() + 2000;
+  return Promise.all(Array.from({ length: 20 }, (_, index) => new Promise<string>((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", script], {
+      env: { ...process.env, LEASE_START: String(start), LEASE_DIR: dir, LEASE_JOB: `job-${index}` },
+      stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+    });
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.on("error", reject);
+    child.on("close", () => resolve(output));
+  })));
+}
+
+test("twenty processes racing for a port with an expired lease leave exactly one winner", async () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  writeRaw(3010, JSON.stringify({ leaseId: "expired-lease", port: 3010, jobId: "old-job", peer: "tester", sessionId: "session",
+    holder: { pid: 1, startTime: "1", surface: "library" }, acquiredAt: past, renewedAt: past, expiresAt: past, ttlMs: 10_000 }));
+  const runs = await raceTwenty(3010);
+  expect(runs.filter((run) => run === "won")).toHaveLength(1);
+  expect(runs.filter((run) => run === "lost:E_LEASE_CONFLICT")).toHaveLength(19);
+  const leases = new LeaseManager({ dir, alive: () => true }).list();
+  expect(leases).toHaveLength(1);
+  expect(leases[0].jobId).toBe(`job-${runs.indexOf("won")}`);
+}, 30_000);
+
 test("twenty processes racing for one port leave exactly one winner", async () => {
   const source = pathToFileURL(path.join(REPO, "src", "leases.ts")).href;
   const script = `const { LeaseManager } = await import(${JSON.stringify(source)});
