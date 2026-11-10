@@ -10,7 +10,8 @@ type Outcome = { kind: "ok" } | { kind: "pending"; jobIds: string[] } | { kind: 
 
 /** `priority + min(agingMaxBoost, floor(waited / agingIntervalMs) * agingStep)` (contracts 8.3). */
 export function effectivePriority(entry: QueueEntry, policy: AdmissionPolicy, nowMs: number): number {
-  const steps = Math.floor((nowMs - Date.parse(entry.enqueuedAt)) / policy.agingIntervalMs);
+  // Waited time is never negative: cross-process clock skew must not push a job below its base priority.
+  const steps = Math.floor(Math.max(0, nowMs - Date.parse(entry.enqueuedAt)) / policy.agingIntervalMs);
   return entry.priority + Math.min(policy.agingMaxBoost, steps * policy.agingStep);
 }
 function compareStrings(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
@@ -33,7 +34,7 @@ export function validateDependencies(
   known: (jobId: string) => { dependsOn: string[] } | undefined,
 ): void {
   if (dependsOn.includes(jobId)) throw new FleetError("E_DEPENDENCY_CYCLE", `Dependency cycle through ${jobId}`);
-  const missing = dependsOn.filter((id) => known(id) === undefined);
+  const missing = [...new Set(dependsOn.filter((id) => known(id) === undefined))];
   if (missing.length > 0) {
     throw new FleetError("E_DEPENDENCY_NOT_FOUND", `Unknown dependency: ${missing.join(", ")}`, { jobIds: missing });
   }

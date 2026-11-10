@@ -35,6 +35,8 @@ describe("ordering and aging", () => {
     expect([29_999, 30_000, 90_000, 600_000, 6_000_000].map((ms) => effectivePriority(aged, POLICY, NOW + ms))).toEqual([5, 6, 8, 25, 55]);
     expect(effectivePriority(aged, { ...POLICY, agingStep: 0 }, NOW + 600_000)).toBe(5);
     expect(effectivePriority(aged, { ...POLICY, agingMaxBoost: 0 }, NOW + 600_000)).toBe(5);
+    // Clock skew: "now" slightly before enqueuedAt never lowers the base priority.
+    expect([1, 29_999, 90_000].map((ms) => effectivePriority(aged, POLICY, NOW - ms))).toEqual([5, 5, 5]);
   });
   test("effective priority, then enqueuedAt, then jobId, on a copy", () => {
     expect(orderQueue([entry("b", { priority: 2, enqueuedAt: "2026-01-01T00:01:30.000Z" }), entry("a")], POLICY, NOW + 120_000).map((e) => e.jobId)).toEqual(["a", "b"]);
