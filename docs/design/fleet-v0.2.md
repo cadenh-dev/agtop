@@ -515,7 +515,7 @@ Failure handling: if `CreateFileW` fails with `ERROR_PIPE_BUSY` (231) another pr
 
 ## 8. Spike results
 
-Host: Windows 11 Pro 10.0.26200, Intel Core i7-11800H (16 logical CPUs), Bun 1.4.4, NTFS on NVMe. Command: `bun test spike/fleet-spike.test.ts` on `spike/fleet-v0.2-capture`; 8 tests, 64 assertions, all passing in three consecutive runs. Numbers are from the last run; run-to-run variation was within about 10 %.
+Host: Windows 11 Pro 10.0.26200, Intel Core i7-11800H (16 logical CPUs), Bun 1.4.4. Command: `bun test spike/fleet-spike.test.ts` on `spike/fleet-v0.2-capture`; 8 tests, 64 assertions, all passing in every one of five consecutive runs. The table is from one of those runs. `spike/results-win32.json` on the spike branch holds a later run; throughput and latency differed between runs by up to about 15 %, and the memory figures by under 1 MiB.
 
 | Measurement | Node pipes | Named pipes + Job Object | Budget |
 | --- | --- | --- | --- |
