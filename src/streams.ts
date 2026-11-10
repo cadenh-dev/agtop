@@ -204,10 +204,8 @@ let windowsProvider: CaptureProvider | null = null;
 
 async function openWindowsCapture(jobId: string): Promise<CaptureSession> {
   if (!windowsProvider) {
-    // Built from a variable so type-checking does not require ./windows-pipes.js
-    // (Unit 2.3) to exist before that unit lands.
-    const specifier = "./windows-pipes.js";
-    const module = (await import(specifier)) as { windowsPipeCaptureProvider?: () => CaptureProvider };
+    // A literal specifier lets `bun build --compile` bundle the Windows implementation.
+    const module = (await import("./windows-pipes.js")) as { windowsPipeCaptureProvider?: () => CaptureProvider };
     const factory = module.windowsPipeCaptureProvider;
     if (typeof factory !== "function") {
       throw new Error("windows-pipes.js does not export windowsPipeCaptureProvider()");

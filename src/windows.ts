@@ -73,7 +73,10 @@ class WindowsApi {
       return this.wait(handle, 2000) === 0;
     } finally { this.close(handle); }
   }
-  launch(name: string, command: string, args: string[], cwd: string, env: Record<string, string>, inherit: boolean) {
+  launch(name: string, command: string, args: string[], cwd: string, env: Record<string, string>,
+    stdio: boolean | { stdin: unknown; stdout: unknown; stderr: unknown }) {
+    const supplied = typeof stdio === "object" ? stdio : undefined;
+    const inherit = supplied !== undefined || stdio === true;
     const job = this.createJob(null, name);
     this.check(job, "CreateJobObjectW");
     // Unique names avoid attaching to pre-existing jobs with different limits.
@@ -88,7 +91,7 @@ class WindowsApi {
       const limitBuffer = Buffer.alloc(this.k.sizeof(limits));
       this.k.encode(limitBuffer, limits, { basic: { flags: 0x2000 } });
       this.check(this.setJob(job, 9, limitBuffer, limitBuffer.length), "SetInformationJobObject");
-      if (inherit) {
+      if (stdio === true) {
         for (const kind of [-10, -11, -12]) {
           const output: Handle[] = [null];
           this.check(this.duplicateHandle(this.currentProcess(), this.getStdHandle(kind), this.currentProcess(), output, 0, 1, 2), "DuplicateHandle(stdio)");
@@ -103,17 +106,25 @@ class WindowsApi {
       jobList = this.k.alloc("void *", 1);
       this.k.encode(jobList, "void *", job);
       this.check(this.updateAttribute(attributes, 0, 0x2000d, jobList, this.k.sizeof("void *"), null, null), "UpdateProcThreadAttribute(JOB_LIST)");
-      if (inherit) {
+      if (supplied) {
+        handleList = this.k.alloc("void *", 3);
+        this.k.encode(handleList, this.k.array("void *", 3), [supplied.stdin, supplied.stdout, supplied.stderr]);
+        this.check(this.updateAttribute(attributes, 0, 0x20002, handleList, 3 * this.k.sizeof("void *"), null, null), "UpdateProcThreadAttribute(HANDLE_LIST)");
+      } else if (inherit) {
         handleList = this.k.alloc("void *", 3);
         this.k.encode(handleList, this.k.array("void *", 3), duplicates);
         this.check(this.updateAttribute(attributes, 0, 0x20002, handleList, 3 * this.k.sizeof("void *"), null, null), "UpdateProcThreadAttribute(HANDLE_LIST)");
       }
       const startup = { cb: this.k.sizeof(this.startup), flags: inherit ? 0x100 : 1, show: 0,
-        stdin: duplicates[0] ?? null, stdout: duplicates[1] ?? null, stderr: duplicates[2] ?? null, attributes };
+        stdin: supplied ? supplied.stdin : duplicates[0] ?? null,
+        stdout: supplied ? supplied.stdout : duplicates[1] ?? null,
+        stderr: supplied ? supplied.stderr : duplicates[2] ?? null,
+        attributes };
       const cmdline = Buffer.from([command, ...args].map(quoteWindowsArg).join(" ") + "\0", "utf16le");
       const environment = Buffer.from(Object.entries(env).sort(([a], [b]) => a.toUpperCase().localeCompare(b.toUpperCase())).map(([k, v]) => `${k}=${v}`).join("\0") + "\0\0", "utf16le");
       // JOB_LIST assigns containment during creation; suspended startup lets us persist metadata before execution.
-      this.check(this.createProcess(command, cmdline, null, null, inherit ? 1 : 0, 0x80000 | 0x400 | 0x4 | (inherit ? 0 : 0x08000000), environment, cwd, startup, info), "CreateProcessW");
+      const flags = 0x80000 | 0x400 | 0x4 | (supplied || !inherit ? 0x08000000 : 0);
+      this.check(this.createProcess(command, cmdline, null, null, inherit ? 1 : 0, flags, environment, cwd, startup, info), "CreateProcessW");
       const startTime = this.identity(info.process);
       let closed = false;
       return {
