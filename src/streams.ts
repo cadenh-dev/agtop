@@ -121,8 +121,11 @@ export class PipeStreamReader {
       this.pendingBytes += safe.length;
     }
     if (redactor) {
+      // The hold clock measures a stall: it restarts whenever the redactor releases bytes.
+      // Under continuous output the carry is never empty, so restarting only on empty would
+      // switch every tick to "eof" after MAX_HOLD_MS and release half-arrived secrets.
       if (redactor.heldBytes === 0) this.heldSince = null;
-      else if (this.heldSince === null) this.heldSince = this.now();
+      else if (this.heldSince === null || safe.length > 0) this.heldSince = this.now();
     }
   }
 

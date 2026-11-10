@@ -151,6 +151,24 @@ describe("PipeStreamReader", () => {
     await reader.done;
     expect(output().toString("utf8")).toBe("key=[REDACTED:openai-key]\n");
   });
+
+  test("continuous output past MAX_HOLD_MS still holds back a half-arrived secret", async () => {
+    const source = new PassThrough();
+    let offset = 0;
+    const { reader, output } = capture(source, { redactor: new SecretRedactor(), now: () => Date.now() + offset });
+    // Mid-line output keeps the redactor carry non-empty the whole time.
+    source.write("x".repeat(3000));
+    await sleep(FLUSH_TICK_MS * 2);
+    offset = MAX_HOLD_MS + FLUSH_TICK_MS;
+    source.write("y".repeat(3000) + " key=sk-" + "a".repeat(10)); // bytes released: the stream is not stalled
+    await sleep(FLUSH_TICK_MS * 2);
+    source.write("a".repeat(10) + "\n");
+    source.end();
+    await reader.done;
+    const text = output().toString("utf8");
+    expect(text).toContain("key=[REDACTED:openai-key]\n");
+    expect(text).not.toContain("sk-a");
+  });
 });
 
 describe("pipeCaptureProvider", () => {
