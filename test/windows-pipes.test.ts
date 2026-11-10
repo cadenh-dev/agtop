@@ -29,13 +29,20 @@ async function waitExit(child: NativeProcess, timeoutMs = 30_000): Promise<numbe
   }
 }
 
-/** Verifies that a failed open closed its named-pipe servers: the name accepts a new instance. */
-function canListen(name: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.once("error", () => resolve(false));
-    server.listen(name, () => server.close(() => resolve(true)));
-  });
+/** Verifies that a failed open closed its named-pipe servers: the name accepts a new instance.
+ *  Polls because libuv closes pipe servers asynchronously (slow on loaded CI runners). */
+async function canListen(name: string, timeoutMs = 2000): Promise<boolean> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once("error", () => resolve(false));
+      server.listen(name, () => server.close(() => resolve(true)));
+    });
+    if (ok) return true;
+    await sleep(25);
+  }
+  return false;
 }
 
 function handleCounter(): () => number {
@@ -143,6 +150,26 @@ windowsOnly("windowsPipeCaptureProvider", () => {
     expect(failure).toContain("Win32 error");
     expect(failure).not.toContain(jobId);
     expect(countHandles() - before).toBeLessThanOrEqual(2);
+    expect(await canListen(`\\\\.\\pipe\\agtop-${jobId}-stdout-${nonce}`)).toBe(true);
+    expect(await canListen(`\\\\.\\pipe\\agtop-${jobId}-stderr-${nonce}`)).toBe(true);
+  }, 60_000);
+
+  test("a pipe connection that never arrives times out with capture-error and frees the names", async () => {
+    const jobId = `win-noconnect-${randomUUID()}`;
+    const nonce = randomUUID();
+    let failure = "";
+    try {
+      await openWindowsPipeSession(jobId, {
+        nonce, connectTimeoutMs: 200,
+        // Valid handles that never connect to the pipe servers.
+        openClient: (name, access, open) => open(access === 0x40000000 ? "NUL" : name, access),
+      });
+    } catch (error) {
+      failure = String(error);
+    }
+    expect(failure).toContain("capture-error");
+    expect(failure).toContain("timed out");
+    expect(failure).not.toContain(jobId);
     expect(await canListen(`\\\\.\\pipe\\agtop-${jobId}-stdout-${nonce}`)).toBe(true);
     expect(await canListen(`\\\\.\\pipe\\agtop-${jobId}-stderr-${nonce}`)).toBe(true);
   }, 60_000);

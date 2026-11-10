@@ -4,12 +4,14 @@
 import koffi from "koffi";
 import { randomUUID } from "node:crypto";
 import * as net from "node:net";
+import { validateJobId } from "./registry.js";
 import type { CaptureProvider, CaptureSession } from "./types.js";
 
 type Handle = unknown;
 const GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
 const FILE_SHARE_READ_WRITE = 3, OPEN_EXISTING = 3;
 const INVALID_HANDLE_VALUE = 0xffffffffffffffffn;
+const CONNECT_TIMEOUT_MS = 5000;
 
 class WindowsPipeApi {
   readonly k = koffi;
@@ -100,10 +102,13 @@ export interface WindowsPipeOpenOptions {
   nonce?: string;
   /** Wraps the native client-open call; `open` performs the real CreateFileW. */
   openClient?: (name: string, access: number, open: (name: string, access: number) => Handle) => Handle;
+  /** How long to wait for both pipe connections; production uses CONNECT_TIMEOUT_MS. */
+  connectTimeoutMs?: number;
 }
 
 /** @internal Implementation behind windowsPipeCaptureProvider(); exported only so tests can fail closed. */
 export async function openWindowsPipeSession(jobId: string, options: WindowsPipeOpenOptions = {}): Promise<CaptureSession> {
+  validateJobId(jobId); // the ID becomes part of the pipe name
   const windows = pipeApi();
   const nonce = options.nonce ?? randomUUID();
   const names = {
@@ -119,16 +124,23 @@ export async function openWindowsPipeSession(jobId: string, options: WindowsPipe
     servers.push(await listenPipe(names.stderr));
     // The connection comes from the client end opened below, so it fires on a later loop turn
     // whether or not the child exists yet. Closing the server in the handler rejects a second client.
-    const connected = servers.map((server) => new Promise<net.Socket>((resolve) => {
+    // A server error or a connection that never arrives fails closed instead of crashing or hanging.
+    const connected = servers.map((server) => new Promise<net.Socket>((resolve, reject) => {
       server.once("connection", (socket) => { sockets.push(socket); server.close(); resolve(socket); });
+      server.once("error", () => reject(new Error("capture-error: Windows capture pipe server failed.")));
     }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("capture-error: Windows capture pipe connection timed out.")), options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
+    });
     const nativeOpen = (name: string, access: number) => windows.openInheritable(name, access);
     const openClient = options.openClient;
     const open = openClient ? (name: string, access: number) => openClient(name, access, nativeOpen) : nativeOpen;
     handles.push(open(names.stdin, GENERIC_READ));
     handles.push(open(names.stdout, GENERIC_WRITE));
     handles.push(open(names.stderr, GENERIC_WRITE));
-    const [stdout, stderr] = await Promise.all(connected);
+    let stdout: net.Socket, stderr: net.Socket;
+    try { [stdout, stderr] = await Promise.race([Promise.all(connected), timedOut]); } finally { clearTimeout(timer); }
     return new WindowsPipeCaptureSession(windows, {
       stdin: handles[0], stdout: handles[1], stderr: handles[2],
     }, { stdout, stderr }, servers);

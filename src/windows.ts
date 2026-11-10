@@ -75,7 +75,7 @@ class WindowsApi {
   }
   launch(name: string, command: string, args: string[], cwd: string, env: Record<string, string>,
     stdio: boolean | { stdin: unknown; stdout: unknown; stderr: unknown }) {
-    const supplied = typeof stdio === "object" ? stdio : undefined;
+    const supplied = stdio !== null && typeof stdio === "object" ? stdio : undefined;
     const inherit = supplied !== undefined || stdio === true;
     const job = this.createJob(null, name);
     this.check(job, "CreateJobObjectW");
