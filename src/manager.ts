@@ -185,7 +185,7 @@ export async function spawnContainedAgent(opts: SpawnAgentOptions): Promise<Mana
       record.mode = "linux-cgroup";
     }
     // A separate pipe gates exec without consuming the harness's stdin.
-    child = spawn("/bin/sh", ["-c", 'read -r gate <&3 || exit 125; exec 3<&-; exec "$@"', "agtop-launch", command, ...args], { cwd, env, detached: true, stdio: [opts.stdio || "ignore", opts.stdio || "ignore", opts.stdio || "ignore", "pipe"] });
+    child = spawn("/bin/sh", ["-c", 'read -r gate <&3 || exit 125; exec 3<&-; exec "$@"', "agtop-launch", command, ...args], { cwd, env, detached: true, stdio: [opts.stdio === "inherit" ? "inherit" : "ignore", opts.stdio === "inherit" ? "inherit" : "ignore", opts.stdio === "inherit" ? "inherit" : "ignore", "pipe"] });
     const launched = child;
     const rawExit = new Promise<number>((resolve, reject) => { launched.once("error", reject); launched.once("exit", (code, signal) => resolve(code ?? (signal ? 128 + (os.constants.signals[signal] || 1) : 1))); });
     // Observe errors even if setup fails before returning the public promise.
