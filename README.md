@@ -2,11 +2,114 @@
 
 # agtop
 
-Agent-aware process discovery and containment for Windows, Linux, and macOS. Use it as a terminal monitor, a TypeScript library, or a local HTTP service for an Electron application.
+agtop is an agent-aware process manager for Windows, Linux, and macOS. It finds the AI coding agents running on a machine, shows what each one has started and what it is using, and lets agents start long-lived helpers inside an OS containment unit so that nothing is left running when the task ends. It is for developers who run several coding agents at once, and for the agents themselves.
 
-Recognizes coding agents such as Claude Code, Codex, OpenCode, aider, Goose, Gemini CLI, Qwen Code, Cursor Agent, Antigravity, OpenHands, and Plandex, plus local inference servers such as Lemonade, Ollama, llama.cpp, LM Studio, vLLM, SGLang, LocalAI, KoboldCpp, Tabby, and TGI. Run `agtop harnesses` to list or search the full catalog. Managed jobs can use any executable.
+It recognizes coding agents such as Claude Code, Codex, OpenCode, aider, Goose, Gemini CLI, Qwen Code, Cursor Agent, Antigravity, OpenHands, and Plandex, plus local inference servers such as Lemonade, Ollama, llama.cpp, LM Studio, vLLM, SGLang, LocalAI, KoboldCpp, Tabby, and TGI. Run `agtop harnesses` to list or search the full catalog. Managed jobs can use any executable.
 
-## Native desktop UI
+## Why agtop exists
+
+Coding agents start processes: dev servers, watchers, test runners, builds, subagents, local model servers. They are bad at cleaning up after themselves and cannot see each other. agtop addresses the failures that follow:
+
+| Failure | What happens without agtop | What agtop does |
+| --- | --- | --- |
+| Orphaned processes | An agent's shell exits and its dev server, watcher, or grandchild keeps running for days | Starts each task in a Windows Job Object, Linux cgroup, or process group with a crash watchdog, and tears the whole tree down on exit, timeout, or `cleanup` |
+| Port collisions | A second agent starts the same dev server and fails with `EADDRINUSE`, or silently takes the next port | Shows which job listens on which port before an agent starts anything; Fleet v0.2 adds port leases |
+| Blind cross-session kills | An agent frees a port with `kill` or `taskkill` and stops another agent's work | The agent-facing MCP server only stops jobs its own session created, and shows who owns everything else |
+| GPU and NPU contention | Two agents start a local model or a heavy build at once and both crawl | Measures per-process and per-tree GPU/NPU use so an agent can wait or ask; Fleet v0.2 adds admission guards |
+| Invisible background jobs | A job started in the background fails and its output is gone | Fleet v0.2 captures bounded, redacted output with replay after a crash (in progress; see below) |
+
+agtop manages process lifetimes. It is not a security sandbox: it does not restrict the filesystem, network, memory, or privileges of the processes it starts.
+
+## What it does
+
+1. **Agent and process tree discovery.** Reads the OS process table, recognizes agent harnesses and local inference servers without their cooperation, groups each agent's descendants into a tree, classifies every process by role (dev server, test runner, build, MCP server, subagent, and more), and attributes each tree to its git repository, branch, and worktree. See [Containment and discovery](#containment-and-discovery).
+2. **Orphan-proof containment.** Launches a job inside a Windows Job Object, a delegated Linux cgroup, or a process group with inherited tags, and persists a job record before the process runs. If the manager itself crashes, kill-on-close (Windows) or an out-of-process watchdog (Linux and macOS) removes the tree. Termination checks process creation times, and uses pidfds on Linux, to avoid signaling a reused PID. The process-group modes are best effort; the table under [Containment and discovery](#containment-and-discovery) states what each mode guarantees.
+3. **Port, socket, and accelerator telemetry.** Maps listening ports to the job that owns them, attributes loopback connections to recognized local inference servers, and reports measured GPU, NPU, and GPU-memory use per process and per tree: Windows PDH GPU Engine counters, Linux DRM fdinfo, NVIDIA NVML, and macOS IOKit. It also probes a local Lemonade server for loaded models. Values that cannot be measured are left blank, never shown as zero. See [GPU and NPU usage](#gpu-and-npu-usage).
+4. **Fleet v0.2 (in progress).** A durable job state machine with an append-only event timeline, bounded stdout/stderr capture with secret redaction, a cooperative admission queue with port leases and GPU guards, and federation between daemons. See [Fleet v0.2](#fleet-v02-in-progress).
+
+## Quick start
+
+Requires [Bun](https://bun.sh) for development, or Node.js 22+ for the built JavaScript.
+
+```sh
+bun install
+bun agtop.ts ps            # what agents are running, what they started, what they use
+bun agtop.ts top           # the same, live; q quits
+bun agtop.ts run --harness codex -- codex     # run an agent in a containment unit
+bun agtop.ts mcp           # stdio MCP server for agents
+```
+
+To install a single executable, run `bun run compile` and put `dist/agtop` (`dist/agtop.exe` on Windows) on your PATH. The examples below use `agtop`; from a checkout, substitute `bun agtop.ts`.
+
+## Surfaces
+
+agtop is one engine with five ways in. All of them see the same jobs, because job records live in a per-user state directory.
+
+| Surface | Use it to | Start with |
+| --- | --- | --- |
+| [CLI and live view](#cli-and-live-view) | Look at agents, run one job in the foreground, stop a tree | `agtop`, `agtop ps`, `agtop run` |
+| [MCP server and agent skill](#mcp-server) | Let an agent contain its own helpers and see other agents' jobs | `agtop mcp` |
+| [Local HTTP daemon](#daemon) | Drive agtop from an orchestrator, an Electron app, or scripts | `agtop daemon` |
+| [Native desktop UI](#native-desktop-ui) | Watch and control everything in a window | `agtop ui` |
+| [TypeScript library](#library) | Embed discovery and containment in a Node or Electron main process | `import { spawnContainedAgent } from './dist/index.js'` |
+
+### CLI and live view
+
+Windows containment requires Windows 10 / Server 2016 or newer and Koffi (included in dependencies). Linux requires `/proc`, `getconf`, and `/bin/sh`.
+
+```sh
+agtop --help
+agtop                        # live view on a terminal, snapshot when redirected
+agtop ps --json              # agent trees with roles, ports, CPU, memory, GPU/NPU
+agtop gpu                    # accelerator devices and measurement status
+agtop harnesses claude       # search the harness catalog
+agtop roles                  # the process role catalog
+agtop run --harness codex -- codex
+agtop kill JOB_ID_OR_PID
+agtop cleanup                # stop every managed job
+agtop cleanup --stale --dry-run --json
+agtop lemonade --json
+```
+
+On Windows, pass `.cmd`, `.bat`, and `.ps1` shims through an explicit interpreter:
+
+```powershell
+agtop run --harness codex -- cmd.exe /c codex.cmd
+```
+
+Bare `agtop` opens the live view on a terminal and prints a snapshot when redirected. Press `q` or Ctrl+C to exit the live view. CPU values use 100% for one core; the first library snapshot has no prior sample and reports zero. `ps` takes two samples.
+
+`run` inherits terminal input and output, stays alive until the root command exits, and cleans up remaining descendants on normal exit. Ctrl+C requests tree termination. Nonzero child exits propagate to the CLI. It is a foreground supervisor, not a detached service launcher; use the MCP server or the daemon for managed background jobs.
+
+Build JavaScript and TypeScript declarations with `bun run build`, then run `node dist/cli.js`. To register `agtop` on your PATH for development, run `bun link` after building.
+
+### MCP server and agent skill
+
+`agtop mcp` is a stdio MCP server that gives an agent task-scoped containment: `run` a long-lived helper, `status` and `wait` on it, `kill` it, and `cleanup` everything at the end. `list` shows every agent's jobs, ports, and resource use so the agent can avoid duplicating or disturbing them.
+
+```sh
+claude mcp add --scope user agtop -- /path/to/agtop mcp
+```
+
+Registration for OpenCode, Codex, Cursor, and others, the tool list, and the ownership rules are in [MCP server](#mcp-server). For agents that support skills, install [`skills/agtop/SKILL.md`](skills/agtop/SKILL.md) into the agent's global skills directory; it tells the agent when to use agtop, to check `list` before heavy or port-binding work, and never to stop another agent's job.
+
+### Local HTTP daemon
+
+```sh
+agtop daemon --port 13309
+```
+
+The daemon binds to `127.0.0.1` and prints the path of its bearer token file. Read the token from that file; it grants full local control.
+
+```sh
+TOKEN=$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/agtop/daemon-13309.token")   # Windows: %LOCALAPPDATA%\agtop\daemon-13309.token
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:13309/v1/agents
+curl -s -H "Authorization: Bearer $TOKEN" -d '{"harness":"custom","command":"node","args":["server.js"]}' http://127.0.0.1:13309/v1/agents
+```
+
+Routes, limits, and security properties are in [Daemon](#daemon).
+
+### Native desktop UI
 
 The desktop is built in Rust with [GPUI](https://gpui.rs/). It has live agent lists, full-text filtering across harnesses, commands, branches, peers, and PIDs, repository and branch details, CPU/RSS totals, a process tree, Lemonade status, and launch/stop controls. It uses the same containment engine as the CLI through an authenticated loopback connection. HTTP requests run on a worker thread so scans do not block the window.
 
@@ -20,7 +123,7 @@ Or, after building the CLI, use `agtop ui`. This starts a private daemon on an a
 
 The launch form has a searchable harness picker (backed by the daemon's harness catalog), an executable, an exact JSON argument array, and an optional working directory. On Windows, a Codex npm shim can be launched as `cmd.exe` with `["/c", "codex.cmd"]`. Stopping a tree requires confirmation in the UI; the API verifies the selected root's creation time before acting. Keyboard shortcuts: Ctrl+N to launch, Ctrl+R to refresh, Tab to move focus, Escape to cancel, and Ctrl+Q to quit.
 
-Building the desktop requires a current Rust MSVC toolchain plus Visual Studio C++ Build Tools and the Windows SDK on Windows. On Linux it requires Rust, a C/C++ toolchain, pkg-config, fontconfig, Wayland/X11 and xkbcommon development libraries, and a Vulkan-capable graphics driver. See [Zed's Linux dependency guide](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md) for platform package names. GPUI is pinned to 0.2.2 and the dependency graph is locked in `desktop/Cargo.lock`.
+Building the desktop requires a current Rust MSVC toolchain plus Visual Studio C++ Build Tools and the Windows SDK on Windows. On Linux it requires Rust, a C/C++ toolchain, pkg-config, fontconfig, Wayland/X11 and xkbcommon development libraries, and a Vulkan-capable graphics driver. See [Zed's Linux dependency guide](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md) for platform package names. GPUI is pinned to 0.2.2 and the dependency graph is locked in `desktop/Cargo.lock`. More detail is in [`desktop/README.md`](desktop/README.md).
 
 `bun run desktop:build` copies the native executable to `dist/agtop-desktop.exe` (Windows) or `dist/agtop-desktop` (Linux). Distribute it next to the compiled `agtop` executable and start with `agtop ui`. The UI executable can also attach to an existing `agtop daemon` on port 13309, or accept `--port PORT --token-file PATH`. In that attached mode, closing the window leaves the independently owned daemon and its jobs running. Keep the API on loopback; this version of the UI monitors the machine on which it runs.
 
@@ -32,39 +135,7 @@ bun scripts/build-desktop.ts test
 bun scripts/build-desktop.ts fmt -- --check
 ```
 
-## Run
-
-Requires Bun for development, or Node.js 22+ for the built JavaScript. Windows containment requires Windows 10 / Server 2016 or newer and Koffi (included in dependencies). Linux requires `/proc`, `getconf`, and `/bin/sh`.
-
-```sh
-bun install
-bun agtop.ts --help
-bun agtop.ts ps --json
-bun agtop.ts harnesses claude
-bun agtop.ts mcp
-bun agtop.ts cleanup
-bun agtop.ts cleanup --stale --dry-run --json
-bun agtop.ts top
-bun agtop.ts run --harness codex -- codex
-bun agtop.ts kill JOB_ID
-bun agtop.ts lemonade --json
-```
-
-## Skill evals
-
-Run the manual agent decision evals after editing `skills/agtop/SKILL.md` with `bun run eval:skill`. Choose `--agent claude`, `--agent codex`, or `--agent both`; use `--scenario short-command` (repeatable or comma-separated) to filter scenarios. Add `--dry-run` to print prompts without calling an agent. This harness is not part of `bun test`; real runs make paid agent CLI calls.
-
-On Windows, pass `.cmd`, `.bat`, and `.ps1` shims through an explicit interpreter:
-
-```powershell
-bun agtop.ts run --harness codex -- cmd.exe /c codex.cmd
-```
-
-Build JavaScript and TypeScript declarations with `bun run build`, then run `node dist/cli.js`. To register `agtop` on your PATH for development, run `bun link` after building. Bare `agtop` opens the live view on a terminal and prints a snapshot when redirected. Press `q` or Ctrl+C to exit the live view. CPU values use 100% for one core; the first library snapshot has no prior sample and reports zero. `ps` takes two samples.
-
-`run` inherits terminal input and output, stays alive until the root command exits, and cleans up remaining descendants on normal exit. Ctrl+C requests tree termination. Nonzero child exits propagate to the CLI. It is a foreground supervisor, not a detached service launcher; use daemon mode for managed background jobs.
-
-## Library
+### Library
 
 ```ts
 import { spawnContainedAgent, listAgentTrees, killAgentTree } from './dist/index.js';
@@ -88,6 +159,32 @@ await agent.exited;
 `spawnContainedAgent()` is asynchronous and returns `ManagedAgent`, rather than a Node `ChildProcess`. `stdio` supports `inherit` and `ignore` (the library default). Attach a rejection handler to `exited` when you do not await it immediately. `listAgentTrees()`, `resolveGitWorktree()`, and `probeLemonade()` are also exported. Importing the library does not start the CLI, launch processes, or scan the OS.
 
 In Electron, use the library from the main process and expose a narrow application IPC interface. An app using the HTTP daemon reads its token from the local token file; it should not expose the token to web content.
+
+## Fleet v0.2 (in progress)
+
+**Status: designed and de-risked, not yet implemented.** Nothing in this section is available in the current build. Today, background jobs started through MCP, the daemon, or the desktop discard their output, and there is no queue. The design is final and implementation is planned in five waves.
+
+Fleet v0.2 turns agtop from a process monitor into a small job system for a workstation shared by several agents:
+
+| Capability | What it adds |
+| --- | --- |
+| Durable job records | Every job gets a `JobRecordV2` and moves through eight states (`queued`, `starting`, `running`, `exiting`, `exited`, `failed`, `killed`, `lost`). Each transition is appended to a checksummed per-job event log and flushed to disk, so history survives a daemon crash and a restart can tell finished jobs from lost ones. |
+| Output capture and replay | stdout and stderr are read through non-blocking pipes into a 1 MiB ring per job, with sequence numbers, an explicit truncation marker when old output is dropped, and a rotating on-disk tail. Agents read it with a new MCP `output` tool; people with `agtop logs`, the daemon, or the desktop. |
+| Secret redaction | API keys and tokens (`sk-…`, `ghp_…`, `Authorization:` headers, `…_API_KEY=` assignments, and other common formats) are replaced before output reaches memory, disk, or any API, including secrets split across reads. A job can opt out explicitly; the opt-out is audited. |
+| Cooperative admission | An optional queue with priorities, aging, and job dependencies; per-peer and per-harness concurrency caps; advisory port leases that prevent `EADDRINUSE` between cooperating agents; and GPU, NPU, and memory guards that hold new heavy jobs while the machine is busy. agtop never suspends or throttles a running agent. |
+| Federation | A daemon can list, tail, and stop jobs on another machine. Requests are signed per peer with Ed25519 over TLS, are protected against replay, and are limited by per-peer scopes. No bearer token is shared between machines. |
+
+Everything in v0.1 keeps working: existing CLI flags, HTTP routes, MCP tools, and job records are unchanged, and the new behavior is additive.
+
+Design documents:
+
+- [Architecture, state machine, sequence diagrams, implementation plan, and spike results](docs/design/fleet-v0.2.md)
+- [Engineering contracts: types, file formats, HTTP routes, MCP tools and resources](docs/design/fleet-contracts.md)
+- [Architecture decision records](docs/design/fleet-adrs.md)
+- [Threat model](docs/design/fleet-threat-model.md)
+- [Acceptance specification and release gates](docs/design/fleet-acceptance.md)
+
+Earlier design notes: [accelerator telemetry](docs/design/accelerators.md) and [process roles on macOS](docs/design/roles-macos.md).
 
 ## Containment and discovery
 
@@ -242,6 +339,10 @@ Claude Code: `claude mcp add --scope user agtop -- "C:\...\agtop.exe" mcp`. Curs
 The server's initialization instructions tell the agent when to use it. For a stronger prompt, install the skill in `skills/agtop/SKILL.md` into the agent's global skills directory.
 
 This is least-privilege: the MCP server only stops jobs it created; the authenticated daemon remains the full-control surface for the orchestrator. agtop is lifecycle containment, not a security sandbox, and command lines can contain secrets, so only expose the daemon view to trusted consumers.
+
+## Skill evals
+
+Run the manual agent decision evals after editing `skills/agtop/SKILL.md` with `bun run eval:skill`. Choose `--agent claude`, `--agent codex`, or `--agent both`; use `--scenario short-command` (repeatable or comma-separated) to filter scenarios. Add `--dry-run` to print prompts without calling an agent. This harness is not part of `bun test`; real runs make paid agent CLI calls.
 
 ## Build and verify
 
