@@ -1,0 +1,21 @@
+{
+  "id": "read-job-output",
+  "priorCalls": [
+    {
+      "tool": "agtop_run",
+      "args": { "command": "npm", "args": ["run", "dev"], "jobId": "task-dev", "peer": "task-7" },
+      "result": { "jobId": "task-dev", "pid": 4242, "state": "running", "captured": true }
+    },
+    {
+      "tool": "agtop_wait",
+      "args": { "jobId": "task-dev", "timeoutMs": 5000 },
+      "result": { "jobId": "task-dev", "exited": true, "exitCode": 1, "state": "exited" }
+    }
+  ],
+  "prompt": "The dev server you started as job `task-dev` exited with code 1. Find out why.",
+  "rules": [
+    { "type": "mustCall", "tool": "agtop_output", "argsMatch": { "jobId": "task-dev" } },
+    { "type": "mustNotCall", "tool": "agtop_run", "argsMatch": { "args": "dev" } },
+    { "type": "mustNotCall", "tool": "shell", "argsMatch": { "command": "npm (run dev|start)" } }
+  ]
+}
