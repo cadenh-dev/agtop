@@ -16,7 +16,7 @@ Coding agents start processes: dev servers, watchers, test runners, builds, suba
 | Port collisions | A second agent starts the same dev server and fails with `EADDRINUSE`, or silently takes the next port | Shows which job listens on which port before an agent starts anything; Fleet v0.2 adds port leases |
 | Blind cross-session kills | An agent frees a port with `kill` or `taskkill` and stops another agent's work | The agent-facing MCP server only stops jobs its own session created, and shows who owns everything else |
 | GPU and NPU contention | Two agents start a local model or a heavy build at once and both crawl | Measures per-process and per-tree GPU/NPU use so an agent can wait or ask; Fleet v0.2 adds admission guards |
-| Invisible background jobs | A job started in the background fails and its output is gone | Fleet v0.2 captures bounded, redacted output with replay after a crash (in progress; see below) |
+| Invisible background jobs | A job started in the background fails and its output is gone | Fleet v0.2 captures bounded, redacted output with replay after a crash (see below) |
 
 agtop manages process lifetimes. It is not a security sandbox: it does not restrict the filesystem, network, memory, or privileges of the processes it starts.
 
@@ -25,7 +25,7 @@ agtop manages process lifetimes. It is not a security sandbox: it does not restr
 1. **Agent and process tree discovery.** Reads the OS process table, recognizes agent harnesses and local inference servers without their cooperation, groups each agent's descendants into a tree, classifies every process by role (dev server, test runner, build, MCP server, subagent, and more), and attributes each tree to its git repository, branch, and worktree. See [Containment and discovery](#containment-and-discovery).
 2. **Orphan-proof containment.** Launches a job inside a Windows Job Object, a delegated Linux cgroup, or a process group with inherited tags, and persists a job record before the process runs. If the manager itself crashes, kill-on-close (Windows) or an out-of-process watchdog (Linux and macOS) removes the tree. Termination checks process creation times, and uses pidfds on Linux, to avoid signaling a reused PID. The process-group modes are best effort; the table under [Containment and discovery](#containment-and-discovery) states what each mode guarantees.
 3. **Port, socket, and accelerator telemetry.** Maps listening ports to the job that owns them, attributes loopback connections to recognized local inference servers, and reports measured GPU, NPU, and GPU-memory use per process and per tree: Windows PDH GPU Engine counters, Linux DRM fdinfo, NVIDIA NVML, and macOS IOKit. It also probes a local Lemonade server for loaded models. Values that cannot be measured are left blank, never shown as zero. See [GPU and NPU usage](#gpu-and-npu-usage).
-4. **Fleet v0.2 (in progress).** A durable job state machine with an append-only event timeline, bounded stdout/stderr capture with secret redaction, a cooperative admission queue with port leases and GPU guards, and federation between daemons. See [Fleet v0.2](#fleet-v02-in-progress).
+4. **Fleet v0.2.** A durable job state machine with an append-only event timeline, bounded stdout/stderr capture with secret redaction, a cooperative admission queue with port leases and GPU guards, and federation between daemons. See [Fleet v0.2](#fleet-v02-available).
 
 ## Quick start
 
@@ -160,9 +160,9 @@ await agent.exited;
 
 In Electron, use the library from the main process and expose a narrow application IPC interface. An app using the HTTP daemon reads its token from the local token file; it should not expose the token to web content.
 
-## Fleet v0.2 (in progress)
+## Fleet v0.2 (available)
 
-**Status: available except federation.** Job records, output capture and replay, secret redaction, cooperative admission, the CLI (`agtop jobs/logs/events/queue/leases/submit`), the HTTP routes (`/v1/jobs`, `/v1/queue`, `/v1/policy`, `/v1/leases`), the MCP `output` and `events` tools and resources, and the desktop job-detail surfaces are available in the current build. Federation between daemons is still in progress.
+**Status: available.** Job records, output capture and replay, secret redaction, cooperative admission, the CLI (`agtop jobs/logs/events/queue/leases/submit`, `agtop peers`), the HTTP routes (`/v1/jobs`, `/v1/queue`, `/v1/policy`, `/v1/leases`, `/v1/peers`, `/v1/remote/…`), the MCP `output` and `events` tools and resources, the desktop job detail, and federation between daemons (`agtop daemon --federation-port N --tls-cert FILE --tls-key FILE`) are in the current build.
 
 Fleet v0.2 turns agtop from a process monitor into a small job system for a workstation shared by several agents:
 
@@ -174,7 +174,16 @@ Fleet v0.2 turns agtop from a process monitor into a small job system for a work
 | Cooperative admission | An optional queue with priorities, aging, and job dependencies; per-peer and per-harness concurrency caps; advisory port leases that prevent `EADDRINUSE` between cooperating agents; and GPU, NPU, and memory guards that hold new heavy jobs while the machine is busy. agtop never suspends or throttles a running agent. |
 | Federation | A daemon can list, tail, and stop jobs on another machine. Requests are signed per peer with Ed25519 over TLS, are protected against replay, and are limited by per-peer scopes. No bearer token is shared between machines. |
 
-Everything in v0.1 keeps working: existing CLI flags, HTTP routes, MCP tools, and job records are unchanged, and the new behavior is additive.
+Everything in v0.1 keeps working: existing CLI flags, HTTP routes, MCP tools, and job records are unchanged, and the new behavior is additive. One behavior change: MCP `run` now captures output by default; pass `capture: false` for the v0.1 behavior.
+
+Known limitations in v0.2:
+
+- MCP `list` and `status` reuse one process scan for up to 2 seconds, so another agent's process can appear or disappear up to 2 seconds late. A session's own jobs refresh immediately after `run`, `wait`, `kill` and `cleanup`.
+- A command that prints a never-ending stream without newlines (progress dots) is shown in 1 KiB pieces or after a 2-second pause, because a secret could still be arriving.
+- Federation replay protection is kept in memory: right after a daemon restart, a request captured in the previous 60 seconds could be replayed once. TLS and per-peer scopes still apply.
+- Two `agtop peers add` or `remove` commands run at the same moment: the last one wins.
+- The exit signal of a job is not reported (`signal` is always `null`); the exit code is.
+- Rare races that need a crash at a precise moment plus several competing processes can let two processes briefly hold the fleet lock or a port lease. A job whose port lease keeps failing with a filesystem error holds the queue until it times out or is killed.
 
 Design documents:
 
