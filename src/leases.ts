@@ -159,7 +159,8 @@ export class LeaseManager {
 
   /** Throws E_LEASE_NOT_FOUND, or E_NOT_OWNER when leaseId does not match. */
   renew(port: number, leaseId: string): PortLease {
-    if (!isPort(port)) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${String(port)}`);
+    // Cheap pre-check outside the lock (also covers a missing lease directory); re-checked under it.
+    if (!isPort(port) || this.live(port) === null) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${String(port)}`);
     // D24/D29: check and rewrite under the per-port lock, so a holder stalled across its own expiry
     // cannot overwrite a lease another process took over in the meantime.
     const result = withMutateLock(this.file(port), (): PortLease | FleetError => {
@@ -168,8 +169,13 @@ export class LeaseManager {
       if (lease.leaseId !== leaseId) return new FleetError("E_NOT_OWNER", `Lease ${leaseId} does not hold port ${port}`);
       const nowMs = this.now();
       const renewed: PortLease = { ...lease, renewedAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + lease.ttlMs).toISOString() };
-      writePrivateFileAtomic(this.file(port), JSON.stringify(renewed));
-      return renewed;
+      // Windows: replacing a file another process has open for reading fails with EPERM; retry briefly.
+      for (let attempt = 0; ; attempt += 1) {
+        try { writePrivateFileAtomic(this.file(port), JSON.stringify(renewed)); return renewed; } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EPERM" || attempt >= 50) throw error;
+          pause(2);
+        }
+      }
     });
     if (result === undefined) throw new FleetError("E_INTERNAL", `Lease file for port ${port} is locked`);
     if (result instanceof FleetError) throw result;
