@@ -1,6 +1,7 @@
 use crate::{
     client::{Command, Config, Event},
     input::TextInput,
+    job_detail::JobDetail,
     model::{Agent, Harness, Launch, Lemonade, parse_arguments},
     theme::*,
 };
@@ -60,6 +61,8 @@ pub struct Workbench {
     lemonade: Option<Lemonade>,
     form: Option<LaunchForm>,
     confirm: Option<Agent>,
+    detail: Option<JobDetail>,
+    watched: Option<String>,
 }
 
 impl Workbench {
@@ -97,6 +100,8 @@ impl Workbench {
             lemonade: None,
             form: None,
             confirm: None,
+            detail: None,
+            watched: None,
         }
     }
 
@@ -149,11 +154,32 @@ impl Workbench {
                     self.error = None;
                     self.busy = false;
                 }
+                Event::JobOutput { id, page } => self.with_detail(&id, |detail| detail.apply_output(page)),
+                Event::JobEvents { id, page } => self.with_detail(&id, |detail| detail.apply_events(page)),
+                Event::JobDetailUnavailable { id, message } => {
+                    self.with_detail(&id, |detail| detail.unavailable = Some(message))
+                }
             }
         }
+        self.watch_selected();
         if changed {
             cx.notify();
         }
+    }
+    fn with_detail(&mut self, id: &str, update: impl FnOnce(&mut JobDetail)) {
+        if let Some(detail) = self.detail.as_mut().filter(|detail| detail.job_id == id) {
+            update(detail);
+        }
+    }
+    /// Keep exactly one job's output watched: the current selection.
+    fn watch_selected(&mut self) {
+        let wanted = self.selected.clone();
+        if self.watched == wanted {
+            return;
+        }
+        self.watched = wanted.clone();
+        self.detail = wanted.as_ref().map(|id| JobDetail::new(id.clone()));
+        self.send(Command::WatchJob(wanted));
     }
     fn connected(&self) -> bool {
         self.last_success
@@ -407,12 +433,14 @@ impl Workbench {
                 this.selected = Some(id.clone());
                 this.confirm = None;
                 this.form = None;
+                this.watch_selected();
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "enter" {
                     this.selected = Some(key_id.clone());
                     this.form = None;
+                    this.watch_selected();
                     cx.notify();
                 }
             }))
@@ -830,7 +858,11 @@ impl Workbench {
                                 },
                             ),
                         ),
-                    ),
+                    )
+                    .child(crate::job_detail::render(
+                        self.detail.as_ref(),
+                        &agent.job_id,
+                    )),
             )
     }
     fn launch_form(&self, form: &LaunchForm, cx: &Context<Self>) -> Stateful<Div> {

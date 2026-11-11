@@ -1,4 +1,5 @@
-use crate::model::{Agent, Harness, KillResult, Launch, Lemonade};
+use crate::job_detail::{advance_cursor, events_request, is_terminal, output_request};
+use crate::model::{Agent, EventsPage, Harness, KillResult, Launch, Lemonade, OutputPage};
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use std::{
@@ -51,6 +52,20 @@ impl Config {
     }
 }
 
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
 struct Client {
     base: String,
     token_file: PathBuf,
@@ -86,14 +101,17 @@ impl Client {
             .get(format!("{}{path}", self.base))
             .header("Authorization", &self.auth()?)
             .call()?;
-        if !response.status().is_success() {
-            bail!("Daemon returned HTTP {}.", response.status());
+        let status = response.status();
+        if !status.is_success() {
+            // Surface the daemon's error text. The token never appears in a response body.
+            let text = response.body_mut().with_config().limit(64 * 1024).read_to_string().unwrap_or_default();
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|body| body.get("error").and_then(|error| error.as_str()).map(str::to_owned))
+                .unwrap_or_else(|| format!("Daemon returned HTTP {}.", status.as_u16()));
+            return Err(HttpStatusError { status: status.as_u16(), message }.into());
         }
-        Ok(response
-            .body_mut()
-            .with_config()
-            .limit(32 * 1024 * 1024)
-            .read_json()?)
+        Ok(response.body_mut().with_config().limit(32 * 1024 * 1024).read_json()?)
     }
     fn post<T: DeserializeOwned>(&self, path: &str, value: serde_json::Value) -> Result<T> {
         let mut response = self
@@ -124,6 +142,8 @@ pub enum Command {
     Refresh,
     Stop { id: String, start_time: String },
     Launch(Launch),
+    /// Some(id): start polling this job's output and events. None: stop.
+    WatchJob(Option<String>),
 }
 pub enum Event {
     Snapshot(Vec<Agent>),
@@ -132,6 +152,9 @@ pub enum Event {
     Error(String),
     Completed(String),
     Launched(String),
+    JobOutput { id: String, page: OutputPage },
+    JobEvents { id: String, page: EventsPage },
+    JobDetailUnavailable { id: String, message: String },
 }
 
 pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
@@ -144,16 +167,23 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
         }
         let mut next_probe = Instant::now();
         let mut first = true;
+        let mut watched: Option<(String, u64, u64)> = None;
         loop {
             let command = if first {
                 first = false;
                 Ok(Command::Refresh)
+            } else if watched.is_some() {
+                commands.recv_timeout(Duration::from_secs(1))
             } else {
                 commands.recv_timeout(Duration::from_secs(2))
             };
             let action: Result<Option<Event>> = match command {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) | Ok(Command::Refresh) => Ok(None),
+                Ok(Command::WatchJob(id)) => {
+                    watched = id.map(|id| (id, 0, 0));
+                    Ok(None)
+                }
                 Ok(Command::Stop { id, start_time }) => (|| {
                     let current: Vec<Agent> = client.get("/v1/agents")?;
                     let target = current
@@ -219,12 +249,87 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
                 }
                 next_probe = Instant::now() + Duration::from_secs(15);
             }
+            if let Some((id, output_cursor, event_cursor)) = watched.take() {
+                let (output_cursor, event_cursor, keep) =
+                    poll_detail(&client, &id, output_cursor, event_cursor, &events);
+                if keep {
+                    watched = Some((id, output_cursor, event_cursor));
+                }
+            }
         }
     });
     (send_command, receive_event)
 }
 
-fn encode_segment(text: &str) -> String {
+/// Bounds the work of one polling tick so a job with a large backlog cannot
+/// monopolise the worker. The cursor resumes on the next tick.
+const MAX_PAGES_PER_TICK: usize = 20;
+
+fn poll_detail(
+    client: &Client,
+    id: &str,
+    mut output_cursor: u64,
+    mut event_cursor: u64,
+    events: &Sender<Event>,
+) -> (u64, u64, bool) {
+    let mut keep = true;
+    let mut terminal = false;
+    for _ in 0..MAX_PAGES_PER_TICK {
+        match client.get::<OutputPage>(&output_request(id, output_cursor)) {
+            Ok(page) => {
+                terminal |= is_terminal(&page.state);
+                let more = page.has_more;
+                output_cursor = advance_cursor(output_cursor, page.next_since);
+                if events.send(Event::JobOutput { id: id.to_owned(), page }).is_err() {
+                    return (output_cursor, event_cursor, false);
+                }
+                if !more {
+                    break;
+                }
+            }
+            Err(error) => {
+                keep = detail_failure(&error, id, events);
+                break;
+            }
+        }
+    }
+    if keep {
+        for _ in 0..MAX_PAGES_PER_TICK {
+            match client.get::<EventsPage>(&events_request(id, event_cursor)) {
+                Ok(page) => {
+                    let more = page.has_more;
+                    event_cursor = advance_cursor(event_cursor, page.next_since);
+                    if events.send(Event::JobEvents { id: id.to_owned(), page }).is_err() {
+                        return (output_cursor, event_cursor, false);
+                    }
+                    if !more {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    keep = detail_failure(&error, id, events);
+                    break;
+                }
+            }
+        }
+    }
+    (output_cursor, event_cursor, keep && !terminal)
+}
+
+/// Reports a detail request failure. Returns whether the job stays watched.
+fn detail_failure(error: &anyhow::Error, id: &str, events: &Sender<Event>) -> bool {
+    let status = error.downcast_ref::<HttpStatusError>().map(|error| error.status);
+    if matches!(status, Some(404 | 409 | 410)) {
+        let message = format!("{error:#}");
+        let _ = events.send(Event::JobDetailUnavailable { id: id.to_owned(), message });
+        false
+    } else {
+        let _ = events.send(Event::Error(format!("{error:#}")));
+        true
+    }
+}
+
+pub(crate) fn encode_segment(text: &str) -> String {
     text.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || b"-_".contains(&b) {
