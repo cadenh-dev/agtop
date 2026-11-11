@@ -66,9 +66,12 @@ async function finish(jobId: string, code = 0): Promise<void> {
 const write = (jobId: string, stream: "stdout" | "stderr", text: string): void => { fakes.get(jobId)!.out![stream].write(text); };
 
 interface RunResult { code: number; stdout: string; stderr: string }
+/** stdout captured so far by the command currently running in run(). */
+let liveOut: string[] = [];
 /** Runs the command in-process exactly as cli.ts does, capturing both streams and the exit code. */
 async function run(...args: string[]): Promise<RunResult> {
   const out: string[] = [], err: string[] = [];
+  liveOut = out;
   const stdout = process.stdout.write, stderr = process.stderr.write;
   const sink = (target: string[]) => ((chunk: string | Uint8Array) => {
     target.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString()); return true;
@@ -127,7 +130,11 @@ test("logs --follow keeps polling until the job is terminal", async () => {
   await service.submit({ command: "echo", jobId: "follower" }, admin);
   write("follower", "stdout", "start\n"); await sleep(50);
   const pending = run("logs", "follower", "--follow");
-  await sleep(150);
+  // End the job only after the first page was printed, so "end" can arrive only through a follow poll.
+  const deadline = Date.now() + 5000;
+  while (!liveOut.join("").includes("start") && Date.now() < deadline) await sleep(20);
+  expect(liveOut.join("")).toContain("start");
+  expect(liveOut.join("")).not.toContain("end");
   write("follower", "stdout", "end\n");
   await finish("follower");
   const result = await pending;
@@ -155,6 +162,7 @@ test("queue shows queued entries with their blockers and the policy", async () =
   service = await openService();
   await service.submit({ command: "echo", jobId: "blocker" }, admin);
   await service.submit({ command: "echo", jobId: "waiting", dependsOn: ["blocker"] }, admin);
+  service.setPolicy({ ...service.queue().policy, pollMs: 250 });
 
   const text = await run("queue");
   expect(text.code).toBe(0);
