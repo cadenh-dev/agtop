@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { peersCommand } from "../src/cli-peers.js";
 import { parseDaemonOptions } from "../src/cli.js";
 import { FleetError } from "../src/fleet-errors.js";
@@ -67,12 +69,25 @@ test("identity is created once, is idempotent, and its key round-trips", () => {
   const message = Buffer.from("peer registry");
   expect(verify(null, message, publicKey, sign(null, message, registry.privateKey()))).toBe(true);
 });
-test("two registries calling ensureIdentity together end with one identity", async () => {
-  const a = new PeerRegistry({ dir: dir() }), b = new PeerRegistry({ dir: dir() });
-  const [left, right] = await Promise.all([Promise.resolve().then(() => a.ensureIdentity("node-a")), Promise.resolve().then(() => b.ensureIdentity("node-b"))]);
-  expect(left).toEqual(right);
-  expect(JSON.parse(fs.readFileSync(path.join(dir(), "identity.json"), "utf8"))).toEqual(left);
-});
+test("eight processes calling ensureIdentity together end with one identity", async () => {
+  // Separate processes: in one process the synchronous calls would only run one after another.
+  const script = path.join(root, "ensure-identity.ts");
+  const registryUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/remote/registry.ts")).href;
+  fs.writeFileSync(script, [
+    `import { PeerRegistry } from ${JSON.stringify(registryUrl)};`,
+    "const id = new PeerRegistry({ dir: process.argv[2] }).ensureIdentity(process.argv[3]);",
+    "process.stdout.write(JSON.stringify(id));",
+  ].join("\n"));
+  const outputs = await Promise.all(Array.from({ length: 8 }, (_, index) => new Promise<string>((resolve, reject) => {
+    execFile(process.execPath, [script, dir(), `node-${index}`], { timeout: 20_000 }, (error, stdout, stderr) => {
+      if (error) reject(new Error(`${error.message}\n${stderr}`)); else resolve(stdout);
+    });
+  })));
+  const identities = outputs.map((text) => JSON.parse(text) as { id: string; publicKey: string });
+  for (const identity of identities) expect(identity).toEqual(identities[0]!);
+  expect(JSON.parse(fs.readFileSync(path.join(dir(), "identity.json"), "utf8"))).toEqual(identities[0]);
+  expect(new PeerRegistry({ dir: dir() }).ensureIdentity()).toEqual(identities[0]!);
+}, 30_000);
 test("upsert enforces every documented validation rule", () => {
   const registry = new PeerRegistry({ dir: dir() });
   const fails = (input: unknown, field: string): void => {
@@ -85,6 +100,7 @@ test("upsert enforces every documented validation rule", () => {
   fails(peer({ url: "https://peer-b.example/api" }), "url");
   fails(peer({ url: "https://peer-b.example/?x=1" }), "url");
   fails(peer({ url: "https://user:pass@peer-b.example" }), "url");
+  fails(peer({ url: "https://peer-b.example/#frag" }), "url");
   fails(peer({ publicKey: "AAAA" }), "publicKey");
   fails(peer({ scopes: ["jobs:list", "jobs:list"] }), "scopes");
   fails(peer({ scopes: ["jobs:everything"] }), "scopes");

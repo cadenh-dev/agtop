@@ -5,6 +5,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { audit } from "../audit.js";
 import { fleetDir } from "../event-store.js";
 import { FleetError } from "../fleet-errors.js";
 import { assertPrivateFile, createPrivateFileExclusive, ensurePrivateDir, hardenWindowsAcl, writePrivateFileAtomic } from "../secure-fs.js";
@@ -16,6 +17,10 @@ const PEER_ID_RE = /^[a-z0-9][a-z0-9-]{2,62}$/;
 const PEER_SCOPES: ReadonlySet<string> = new Set<PeerScope>(["jobs:list", "jobs:read", "jobs:output", "jobs:events", "jobs:submit", "jobs:kill", "jobs:kill-any", "telemetry:read"]);
 const RAW_PUBLIC_KEY_RE = /^[A-Za-z0-9+/]{43}=$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+/** Imports a peer's raw 32-byte base64 Ed25519 public key (contracts 11.1). */
+export function importRawPublicKey(raw: string): crypto.KeyObject {
+  return crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(raw, "base64")]), format: "der", type: "spki" });
+}
 const SEEN_FLUSH_MS = 60_000;
 const MAX_PREFIXES = 16, MAX_PREFIX_LENGTH = 200, MAX_CERT_LENGTH = 16_384;
 
@@ -34,6 +39,7 @@ function validateUrl(value: unknown): string {
   if (url.protocol !== "https:") invalid("url", "url must use https.");
   if (url.pathname !== "/") invalid("url", "url must not include a path.");
   if (url.search !== "") invalid("url", "url must not include a query.");
+  if (url.hash !== "") invalid("url", "url must not include a fragment.");
   if (url.username !== "" || url.password !== "") invalid("url", "url must not include credentials.");
   return url.origin;
 }
@@ -104,10 +110,17 @@ export class PeerRegistry {
       const pem = pair.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
       if (createPrivateFileExclusive(this.keyPath, pem)) {
         key = pair.privateKey;
-        if (process.platform === "win32") hardenWindowsAcl(this.keyPath);
+        if (process.platform === "win32") {
+          // Threat model 4.2: a failed ACL hardening is audited and warned; the listener (5.4) refuses to start.
+          const result = hardenWindowsAcl(this.keyPath);
+          if (!result.ok) {
+            process.stderr.write(`agtop: could not restrict access to ${this.keyPath}; the federation listener will refuse to start\n`);
+            audit({ event: "acl-hardening-failed", actor: "admin", detail: `${this.keyPath}: ${result.message ?? "icacls failed"}` });
+          }
+        }
       } else key = this.readKeyAfterRace();
     }
-    const publicKey = rawPublicKey(key), existing = this.readIdentity();
+    const publicKey = rawPublicKey(key), existing = this.readIdentitySettled();
     if (existing !== null) {
       if (existing.publicKey === publicKey) return existing;
       // identity.key was rotated (delete it, then `agtop peers init`): keep the id, publish the new key.
@@ -119,7 +132,8 @@ export class PeerRegistry {
     validateId(wanted);
     const candidate = { id: wanted, publicKey };
     if (createPrivateFileExclusive(this.identityPath, `${JSON.stringify(candidate, null, 2)}\n`)) return candidate;
-    const winner = this.readIdentity();
+    // The winner may still be writing identity.json between its exclusive create and close.
+    const winner = this.readIdentitySettled();
     if (winner === null) throw new FleetError("E_INTERNAL", `Cannot read the federation identity at ${this.identityPath}.`);
     return winner;
   }
@@ -217,6 +231,15 @@ export class PeerRegistry {
     try { return crypto.createPrivateKey(fs.readFileSync(this.keyPath)); } catch { return null; }
   }
   /** A concurrent creator may still be writing; poll briefly instead of reading a partial PEM. */
+  /** readIdentity, retried for up to ~100 ms while another process is still writing identity.json. */
+  private readIdentitySettled(): LocalIdentity | null {
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; ; attempt++) {
+      try { return this.readIdentity(); }
+      catch (error) { if (attempt >= 19) throw error; }
+      Atomics.wait(pause, 0, 0, 5);
+    }
+  }
   private readKeyAfterRace(): crypto.KeyObject {
     const pause = new Int32Array(new SharedArrayBuffer(4));
     for (let attempt = 0; attempt < 20; attempt++) {
