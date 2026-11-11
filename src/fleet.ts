@@ -237,6 +237,9 @@ export class FleetService {
     }
     let startPromise: Promise<JobRecordV2> | undefined;
     await withFleetLock(async () => {
+      // close() may have run while this call waited for the lock; the job is not enqueued yet, so
+      // shutdown() could not see it. Refuse before creating anything.
+      if (this.deps.lifecycle.closed) throw new FleetError("E_INTERNAL", "FleetService is closed.");
       for (const port of leasePorts) { const holder = this.deps.leases.check(port, jobId); if (holder !== null) throw conflict(port, holder); }
       auditRedaction(); enqueue();
       try {

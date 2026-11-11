@@ -227,6 +227,19 @@ test("close during an admission pass waiting for the fleet lock starts nothing a
   await expect(service.submit({ command: "echo" }, asSession(service))).rejects.toMatchObject({ code: "E_INTERNAL" });
 });
 
+test("an immediate submit waiting for the fleet lock is refused if close() runs meanwhile", async () => {
+  const service = await openFleet("library", identity("session-a"));
+  let release!: () => void;
+  const held = withFleetLock(() => new Promise<void>((resolve) => { release = resolve; }));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const pending = service.submit({ command: "echo", jobId: "late-immediate" }, asSession(service)).catch((caught) => caught);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await service.close();
+  release(); await held;
+  expect(await pending).toMatchObject({ code: "E_INTERNAL" });
+  expect(codeOf(() => service.get("late-immediate", admin))).toBe("E_JOB_NOT_FOUND");
+});
+
 test("redact:false stores raw output, records it, and audits once", async () => {
   const service = await openFleet("library", identity("session-a"));
   const secret = `sk-${"a".repeat(30)}`;
