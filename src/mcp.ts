@@ -4,6 +4,7 @@ import { z } from "zod";
 import { probeLemonade } from "./backend.js";
 import { searchHarnesses } from "./harnesses.js";
 import { listAgentTrees } from "./manager.js";
+import type { AgentProcessTree } from "./types.js";
 import { getAcceleratorSnapshot } from "./accelerators.js";
 import { formatEndpoint } from "./net-format.js";
 import { FleetService } from "./fleet.js";
@@ -12,6 +13,7 @@ import { failure, registerFleetResources, registerFleetTools, text, type FleetTo
 export { cleanupResults, ownedProcessSummary, statusPayload, summary } from "./mcp-v2.js";
 
 const VERSION = "0.2.0";
+const TREE_SNAPSHOT_MS = 2_000;
 
 export const formatListeningEndpoint = formatEndpoint;
 
@@ -33,9 +35,22 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
   );
   let resources: ReturnType<typeof registerFleetResources> | undefined;
   try {
+    // One process scan serves every list/status call for TREE_SNAPSHOT_MS after it finishes (landmine L7:
+    // a Windows CIM scan costs ~1 s). Concurrent callers share the scan in flight; this session's own
+    // run/kill/wait/cleanup drop the snapshot so its jobs are never shown stale.
+    let snapshot: { trees: Promise<AgentProcessTree[]>; readyAt: number | null } | undefined;
+    const trees = (): Promise<AgentProcessTree[]> => {
+      const current = snapshot;
+      if (current !== undefined && (current.readyAt === null || Date.now() - current.readyAt <= TREE_SNAPSHOT_MS)) return current.trees;
+      const next: { trees: Promise<AgentProcessTree[]>; readyAt: number | null } = { trees: listAgentTrees(), readyAt: null };
+      snapshot = next;
+      next.trees.then(() => { next.readyAt = Date.now(); }, () => { if (snapshot === next) snapshot = undefined; });
+      return next.trees;
+    };
     const helpers: FleetToolHelpers = {
       peerFor: (extra, requested) => peerFor(extra, requested, defaultPeer),
-      trees: listAgentTrees,
+      trees,
+      invalidateTrees: () => { snapshot = undefined; },
     };
     registerFleetTools(server, fleet, helpers);
     resources = registerFleetResources(server, fleet, helpers);
