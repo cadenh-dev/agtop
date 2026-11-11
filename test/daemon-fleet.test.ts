@@ -356,4 +356,35 @@ test("close() closes the fleet and stops fleet jobs", async () => {
   expect(alive(pid)).toBe(true);
   await daemon.close();
   expect(alive(pid)).toBe(false);
+  await daemon.close();
+}, 20000);
+
+test("review fixes: tokenHash hidden, strict kill/renew bodies, no retry after a lease takeover", async () => {
+  const daemon = await serveFleet();
+  const created = await send(daemon, "POST", "/v1/jobs", { body: nodeJob({ jobId: "hash-job", capture: false }) });
+  expect(created.status).toBe(201);
+  const detail = json(await send(daemon, "GET", "/v1/jobs/hash-job")) as { record: { owner: { tokenHash: string } } };
+  expect(detail.record.owner.tokenHash).toBe("");
+  const kill = await send(daemon, "POST", "/v1/jobs/hash-job/kill", { body: { detail: "x", extra: 1 } });
+  expect(kill.status).toBe(400); expect((json(kill).details as { field: string }).field).toBe("extra");
+  const renew = await send(daemon, "POST", "/v1/leases/47655/renew", { body: { leaseId: "a", extra: 1 } });
+  expect(renew.status).toBe(400); expect((json(renew).details as { field: string }).field).toBe("extra");
+
+  // Another process takes the port between the route's read and its release: the newcomer must survive.
+  const { handleFleetRoute } = await import("../src/daemon-routes.js");
+  const { FleetError } = await import("../src/fleet-errors.js");
+  const released: string[] = [];
+  let current = "old";
+  const fake = { leases: {
+    get: () => ({ port: 47656, leaseId: current }),
+    release: (_port: number, leaseId: string) => {
+      if (leaseId === "old") { current = "new"; throw new FleetError("E_NOT_OWNER", "replaced"); }
+      released.push(leaseId);
+    },
+  } } as unknown as FleetService;
+  const ctx = { method: "DELETE", path: "/v1/leases/47656", query: new URLSearchParams(), readBody: async () => ({}) };
+  const error = await handleFleetRoute(fake, ctx).then(() => undefined, (e: unknown) => e);
+  expect(error).toBeInstanceOf(FleetError);
+  expect((error as InstanceType<typeof FleetError>).code).toBe("E_LEASE_CONFLICT");
+  expect(released).toEqual([]);
 }, 20000);

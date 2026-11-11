@@ -103,7 +103,9 @@ export async function startDaemon(options: {
       fs.writeFileSync(tokenFile, token, { mode: 0o600 });
       if (process.platform !== "win32") fs.chmodSync(tokenFile, 0o600);
     } catch (e) { server.close(); throw e; }
-    return { port: address.port, tokenFile, close: async () => {
+    // Concurrent or repeated close() calls share one shutdown.
+    let closing: Promise<void> | undefined;
+    return { port: address.port, tokenFile, close: () => closing ??= (async () => {
       const stopped = new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve()));
       server.closeIdleConnections();
       await stopped;
@@ -115,7 +117,7 @@ export async function startDaemon(options: {
         // Fleet shutdown is always awaited; the token file is removed even if it throws.
         try { await fleet.close(); } finally { fs.rmSync(tokenFile, { force: true }); }
       }
-    } };
+    })() };
   } catch (error) {
     await fleet.close().catch(() => undefined);
     throw error;

@@ -25,6 +25,8 @@ const JOB_STATES: ReadonlySet<string> = new Set(["queued", "starting", "running"
 const EVENT_TYPES: ReadonlySet<string> = new Set(["state", "spawn", "stdout", "stderr", "exit", "lease", "policy"]);
 const DEFAULT_EVENT_TYPES: JobEventType[] = ["state", "spawn", "exit", "lease", "policy"];
 const LEASE_FIELDS: ReadonlySet<string> = new Set(["port", "ttlMs", "peer", "jobId"]);
+const KILL_FIELDS: ReadonlySet<string> = new Set(["detail"]);
+const RENEW_FIELDS: ReadonlySet<string> = new Set(["leaseId"]);
 
 function invalid(field: string, message: string): FleetError {
   return new FleetError("E_INVALID_REQUEST", message, { field });
@@ -145,7 +147,12 @@ async function dispatch(fleet: FleetService, ctx: RouteContext): Promise<RouteRe
   const kill = /^\/v1\/jobs\/([^/]+)\/kill$/.exec(path);
   if (method === "POST" && kill !== null) return killJob(fleet, jobIdOf(kill[1]!), ctx);
   const job = /^\/v1\/jobs\/([^/]+)$/.exec(path);
-  if (method === "GET" && job !== null) return { status: 200, body: fleet.get(jobIdOf(job[1]!), ADMIN) };
+  if (method === "GET" && job !== null) {
+    // The owner token hash never leaves the state directory, as in events (contracts 10.2).
+    const view = fleet.get(jobIdOf(job[1]!), ADMIN);
+    const record = view.record === undefined ? undefined : { ...view.record, owner: { ...view.record.owner, tokenHash: "" } };
+    return { status: 200, body: record === undefined ? view : { ...view, record } };
+  }
   return undefined;
 }
 
@@ -156,7 +163,7 @@ async function submitJob(fleet: FleetService, ctx: RouteContext): Promise<RouteR
 }
 
 async function killJob(fleet: FleetService, jobId: string, ctx: RouteContext): Promise<RouteResult> {
-  const body = bodyObject(await ctx.readBody());
+  const body = bodyObject(await ctx.readBody(), KILL_FIELDS);
   const detail = body.detail === undefined ? undefined : stringField(body, "detail", 500);
   const outcome = await fleet.kill(jobId, ADMIN, detail);
   if (outcome.result !== null && (outcome.result.failedPids.length > 0 || outcome.result.errors.length > 0)) {
@@ -207,26 +214,24 @@ async function createLease(fleet: FleetService, ctx: RouteContext): Promise<Rout
 }
 
 async function renewLease(fleet: FleetService, port: number, ctx: RouteContext): Promise<RouteResult> {
-  const body = bodyObject(await ctx.readBody());
+  const body = bodyObject(await ctx.readBody(), RENEW_FIELDS);
   const leaseId = stringField(body, "leaseId", 200);
   return { status: 200, body: { lease: fleet.leases.renew(port, leaseId) } };
 }
 
 function deleteLease(fleet: FleetService, port: number, query: URLSearchParams): RouteResult {
   const supplied = query.get("leaseId") ?? undefined;
-  // The lease is read and then removed; a holder replaced between the two is retried once below,
-  // never deleted (leases.ts deletes only the exact leaseId it was given).
-  for (let attempt = 0; ; attempt += 1) {
-    const lease = fleet.leases.get(port);
-    if (lease === null) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${port}`);
-    if (supplied !== undefined && lease.leaseId !== supplied) throw new FleetError("E_NOT_OWNER", `Lease ${supplied} does not hold port ${port}`);
-    try {
-      fleet.leases.release(port, lease.leaseId);
-      return { status: 200, body: { released: true } };
-    } catch (error) {
-      const replaced = error instanceof FleetError && error.code === "E_NOT_OWNER";
-      if (supplied !== undefined || !replaced || attempt >= 2) throw error;
+  const lease = fleet.leases.get(port);
+  if (lease === null) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${port}`);
+  if (supplied !== undefined && lease.leaseId !== supplied) throw new FleetError("E_NOT_OWNER", `Lease ${supplied} does not hold port ${port}`);
+  // release() deletes only this exact leaseId under the per-port lock. If another process took the
+  // port after the read, report it instead of retrying: a retry would release the newcomer's lease.
+  try { fleet.leases.release(port, lease.leaseId); }
+  catch (error) {
+    if (supplied === undefined && error instanceof FleetError && error.code === "E_NOT_OWNER") {
+      throw new FleetError("E_LEASE_CONFLICT", `The lease on port ${port} changed while it was being released; read it again`, { port });
     }
+    throw error;
   }
-  throw new FleetError("E_INTERNAL", "Lease changed repeatedly while releasing it.");
+  return { status: 200, body: { released: true } };
 }
