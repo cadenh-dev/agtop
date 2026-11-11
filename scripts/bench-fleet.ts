@@ -160,26 +160,26 @@ async function startSupervisorJob(root: string, jobId: string, command: string, 
     // FleetService.wait uses unref'd timers: without a ref'd handle first, POSIX exits before the job ends.
     `setInterval(() => {}, 1000);`,
     // Breadcrumbs: if the supervisor dies, the parent reports the last step it reached.
-    `const step = (name: string): void => { try { fs.appendFileSync(process.env.AGTOP_READY_FILE! + ".steps", name + "\\n"); } catch {} };`,
+    `const step = (name: string): void => { try { fs.appendFileSync(process.env.BENCH_READY_FILE! + ".steps", name + "\\n"); } catch {} };`,
     `process.on("exit", (code) => step("exit " + code));`,
     `for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) process.on(signal, () => { step("signal " + signal); process.exit(128); });`,
     `try {`,
     `step("start");`,
-    `const { FleetService } = await import(process.env.AGTOP_FLEET_URL!);`,
+    `const { FleetService } = await import(process.env.BENCH_FLEET_URL!);`,
     `step("imported");`,
     `const service = await FleetService.open({ surface: "library" });`,
     `step("opened");`,
-    `const job = await service.submit({ jobId: process.env.AGTOP_JOB_ID!, command: process.env.AGTOP_COMMAND!, args: JSON.parse(process.env.AGTOP_ARGS!), cwd: process.env.AGTOP_CWD! }, { kind: "session", session: service.session, peer: "bench" });`,
+    `const job = await service.submit({ jobId: process.env.BENCH_JOB_ID!, command: process.env.BENCH_COMMAND!, args: JSON.parse(process.env.BENCH_ARGS!), cwd: process.env.BENCH_CWD! }, { kind: "session", session: service.session, peer: "bench" });`,
     `step("submitted " + job.state);`,
-    `const done = await service.wait(job.jobId, Number(process.env.AGTOP_WAIT_MS));`,
+    `const done = await service.wait(job.jobId, Number(process.env.BENCH_WAIT_MS));`,
     `step("waited " + done.state);`,
-    `fs.writeFileSync(process.env.AGTOP_READY_FILE!, JSON.stringify({ jobId: job.jobId, state: done.state, exitCode: done.exitCode }));`,
+    `fs.writeFileSync(process.env.BENCH_READY_FILE!, JSON.stringify({ jobId: job.jobId, state: done.state, exitCode: done.exitCode }));`,
     `} catch (error) { step("error " + (error instanceof Error ? error.stack ?? error.message : String(error)).replace(/\\n/g, " | ")); throw error; }`,
   ].join("\n"));
   const child = spawn(process.execPath, [scriptFile], {
     env: {
-      ...process.env, AGTOP_FLEET_URL: fleetUrl, AGTOP_JOB_ID: jobId, AGTOP_COMMAND: command,
-      AGTOP_ARGS: JSON.stringify(args), AGTOP_CWD: root, AGTOP_WAIT_MS: String(timeoutMs), AGTOP_READY_FILE: readyFile,
+      ...process.env, BENCH_FLEET_URL: fleetUrl, BENCH_JOB_ID: jobId, BENCH_COMMAND: command,
+      BENCH_ARGS: JSON.stringify(args), BENCH_CWD: root, BENCH_WAIT_MS: String(timeoutMs), BENCH_READY_FILE: readyFile,
     },
     stdio: ["ignore", "ignore", "pipe"], windowsHide: true,
   });
