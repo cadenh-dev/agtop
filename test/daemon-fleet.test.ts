@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
@@ -12,6 +12,10 @@ import { DEFAULT_ADMISSION_POLICY } from "../src/policy.js";
 type JsonObject = Record<string, unknown>;
 type HttpResult = { status: number; headers: IncomingHttpHeaders; body: string };
 type TestDaemon = Awaited<ReturnType<typeof startDaemon>> & { token: string };
+
+// Each startDaemon opens a FleetService that takes a process snapshot (1-2 s on a cold Windows host
+// via PowerShell/CIM); tests that start several daemons exceed bun's 5 s default there (D42).
+setDefaultTimeout(30_000);
 
 let root = "", previousStateDir: string | undefined;
 const daemons: TestDaemon[] = [];
