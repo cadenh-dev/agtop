@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod client;
 mod input;
+mod job_detail;
 mod model;
 mod theme;
 mod ui;
