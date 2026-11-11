@@ -6,3 +6,8 @@ export { resolveGitWorktree } from "./git.js";
 export { probeLemonade } from "./backend.js";
 export { startDaemon } from "./daemon.js";
 export { ROLE_ORDER, ROLE_INFO, roleCatalog, classifyTreeRoles } from "./roles.js";
+export { FleetService } from "./fleet.js";
+export type { SubmitJobRequest, JobView } from "./fleet.js";
+export type { Caller } from "./ownership.js";
+export { FleetError } from "./fleet-errors.js";
+export { truncationMarker, renderOutputText } from "./capture.js";
