@@ -7,6 +7,7 @@ import { getAcceleratorSnapshot } from "./accelerators.js";
 import { probeLemonade } from "./backend.js";
 import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
+import { fleetCommand } from "./cli-fleet.js";
 import { searchHarnesses } from "./harnesses.js";
 import { ROLE_ORDER, roleCatalog } from "./roles.js";
 import { startMcpServer } from "./mcp.js";
@@ -25,6 +26,12 @@ const help = `agtop — agent-aware process manager
   agtop cleanup [--stale] [--dry-run] [--json]  Stop jobs or prune stale records
   agtop harnesses [QUERY] [--json]  List or search supported harnesses
   agtop roles [QUERY] [--json]      List or search process roles
+  agtop jobs [--state S[,S...]] [--json]  List fleet jobs
+  agtop logs JOB_ID [--stream S] [--tail N] [--since N] [--follow] [--json]
+  agtop events JOB_ID [--since N] [--json]  Show a job's lifecycle events
+  agtop queue [--json]        Queued jobs, guards and admission limits
+  agtop leases [--json]       Port leases (lease IDs omitted)
+  agtop submit [--port 13309] [options] -- COMMAND [ARGS...]  Submit a fleet job to the daemon
   agtop mcp [--peer NAME]      MCP stdio server for agent-facing task containment
   agtop lemonade [--json]      Probe local server and loaded models
   agtop daemon [--port 13309]  Authenticated loopback HTTP API
@@ -223,6 +230,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const stop = () => { if (!stopping) { stopping = true; void daemon.close().catch(e => { console.error(String(e)); process.exitCode = 1; }).finally(() => { process.off("SIGINT", stop); process.off("SIGTERM", stop); }); } };
     process.on("SIGINT", stop); process.on("SIGTERM", stop); return;
   }
+  if (await fleetCommand(command, rest)) return;
   throw new Error(`Unknown command: ${command}. Use agtop --help.`);
 }
 if ((import.meta as ImportMeta & { main?: boolean }).main || (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href)) {
