@@ -175,6 +175,8 @@ export class PeerRegistry {
     };
     if (index === -1) peers.push(peer); else peers[index] = peer;
     this.writePeers(peers);
+    // Threat model section 6: peer additions and removals are audited (an update counts as an add).
+    audit({ event: "peer-added", actor: "admin", peerId: id, detail: `scopes: ${scopes.join(",") || "none"}; enabled: ${peer.enabled}` });
     return clonePeer(peer);
   }
 
@@ -183,6 +185,7 @@ export class PeerRegistry {
     if (next.length === peers.length) return false;
     this.pendingSeen.delete(id);
     this.writePeers(next);
+    audit({ event: "peer-removed", actor: "admin", peerId: id });
     return true;
   }
 

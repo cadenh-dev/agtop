@@ -6,6 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { peersCommand } from "../src/cli-peers.js";
+import { readAudit } from "../src/audit.js";
 import { parseDaemonOptions } from "../src/cli.js";
 import { FleetError } from "../src/fleet-errors.js";
 import { PeerRegistry } from "../src/remote/registry.js";
@@ -88,6 +89,14 @@ test("eight processes calling ensureIdentity together end with one identity", as
   expect(JSON.parse(fs.readFileSync(path.join(dir(), "identity.json"), "utf8"))).toEqual(identities[0]);
   expect(new PeerRegistry({ dir: dir() }).ensureIdentity()).toEqual(identities[0]!);
 }, 30_000);
+test("adding and removing a peer writes audit records", () => {
+  const registry = new PeerRegistry({ dir: dir() });
+  registry.upsert(peer());
+  expect(registry.remove("peer-b")).toBe(true);
+  expect(registry.remove("peer-b")).toBe(false);
+  const events = readAudit().filter((record) => record.peerId === "peer-b").map((record) => record.event);
+  expect(events).toEqual(["peer-added", "peer-removed"]);
+});
 test("upsert enforces every documented validation rule", () => {
   const registry = new PeerRegistry({ dir: dir() });
   const fails = (input: unknown, field: string): void => {
