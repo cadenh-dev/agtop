@@ -113,7 +113,8 @@ export class PeerAuth {
     // 2. Known and enabled peer. Unknown and disabled are deliberately indistinguishable.
     const peer = this.registry.get(peerId);
     if (peer === undefined || !peer.enabled) {
-      this.nonces.delete(peerId);
+      // No state change before the signature verifies. The peer's nonce cache is kept (it expires
+      // with NONCE_TTL_MS and the LRU bound), so re-enabling a peer cannot reopen a replay window.
       this.reject("E_SIGNATURE_INVALID", "Unknown or disabled peer.", actor);
     }
 
@@ -141,7 +142,8 @@ export class PeerAuth {
     if (cache.size >= NONCE_CACHE_MAX) this.reject("E_REPLAY_CACHE_FULL", "Nonce cache is full.", actor);
     cache.set(nonceHeader.value, nowMs);
 
-    this.registry.touch(peer.id, new Date(nowMs));
+    // lastSeenAt is advisory: a failed write must not fail an authenticated request after its nonce is spent.
+    try { this.registry.touch(peer.id, new Date(nowMs)); } catch { /* best effort */ }
     return peer;
   }
 

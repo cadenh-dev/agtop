@@ -170,13 +170,18 @@ test("step 5: the nonce cache is bounded and expires lazily after NONCE_TTL_MS",
   expect(auth.verify(request(sign({ nonce: "z".repeat(22) }))).id).toBe("node-b");
 });
 
-test("a removed peer's replay cache is dropped", () => {
-  auth.verify(request(sign()));
+test("disabling and re-enabling a peer keeps its replay cache", () => {
+  const captured = sign();
+  auth.verify(request(captured));
   const caches = (auth as unknown as { nonces: Map<string, Map<string, number>> }).nonces;
-  expect(caches.size).toBe(1);
-  expect(registry.remove("node-b")).toBe(true);
+  const original = registry.get("node-b")!;
+  const input = { id: original.id, url: original.url, publicKey: original.publicKey, scopes: original.scopes };
+  registry.upsert({ ...input, enabled: false });
+  // A request naming the disabled peer is refused without touching any state.
   expect(verifyError(sign(), undefined, "E_SIGNATURE_INVALID").code).toBe("E_SIGNATURE_INVALID");
-  expect(caches.size).toBe(0);
+  expect(caches.get("node-b")?.size).toBe(1);
+  registry.upsert({ ...input, enabled: true });
+  expect(verifyError(captured, undefined, "E_REPLAY").code).toBe("E_REPLAY");
 });
 
 test("a malformed stored public key fails closed instead of throwing", () => {
