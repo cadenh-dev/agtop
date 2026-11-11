@@ -334,7 +334,7 @@ export function registerFleetTools(server: McpServer, fleet: FleetService, helpe
       const view = fleet.get(jobId, caller);
       if (!view.job.owned) return failure("agtop: only jobs created by this MCP session can be stopped.");
       const started = view.record?.containment?.startTime;
-      if (expectedStartTime !== undefined && started !== undefined && started !== expectedStartTime) {
+      if (expectedStartTime !== undefined && (started ?? "") !== expectedStartTime) {
         return failure("agtop: The process identity changed. Refresh the agent tree before terminating it.");
       }
       if (isTerminal(view.job.state)) return text({ jobId, alreadyExited: true, exitCode: view.job.exitCode });
@@ -363,7 +363,7 @@ export function registerFleetTools(server: McpServer, fleet: FleetService, helpe
     const results = await Promise.all(owned.map(async job => {
       if (isTerminal(job.state)) return { jobId: job.jobId, alreadyExited: true, exitCode: job.exitCode };
       try {
-        const killed = await fleet.kill(job.jobId, caller, "cleanup");
+        const killed = await fleet.kill(job.jobId, caller, undefined, "cleanup");
         if (job.state === "queued") return { jobId: job.jobId, cancelled: true, state: killed.job.state };
         return { jobId: job.jobId, ...(killed.result ?? {}) };
       } catch (error) {
@@ -437,8 +437,11 @@ const eventsUri = (jobId: string): string => `agtop://jobs/${jobId}/events`;
 const watchedUris = (jobId: string): string[] => [outputUri(jobId, "stdout"), outputUri(jobId, "stderr"), outputUri(jobId, "both"), eventsUri(jobId)];
 
 /** Resource templates plus subscription notifications (contracts 10.3). */
-export function registerFleetResources(server: McpServer, fleet: FleetService): FleetResources {
-  const caller: Caller = { kind: "session", session: fleet.session, peer: "" };
+export function registerFleetResources(server: McpServer, fleet: FleetService, helpers?: Pick<FleetToolHelpers, "peerFor">): FleetResources {
+  // Access checks are identical to the tools (contracts 10.3): the same session and peerFor() label.
+  type Extra = { _meta?: Record<string, unknown> };
+  const callerOf = (extra: Extra | undefined): Caller =>
+    ({ kind: "session", session: fleet.session, peer: helpers === undefined ? "" : helpers.peerFor(extra ?? {}) });
   const subscriptions = new Set<string>();
   const watches = new Map<string, number>();
   const lastSent = new Map<string, number>();
@@ -484,17 +487,20 @@ export function registerFleetResources(server: McpServer, fleet: FleetService): 
       notifier.listChanged();
     },
     listChanged(): void {
-      try { server.sendResourceListChanged(); } catch { /* transport closed */ }
+      try { void server.server.sendResourceListChanged().catch(() => undefined); } catch { /* transport closed */ }
     },
   };
   notifiers.set(server, notifier);
 
-  const listJobs = (): JobSummaryV2[] => fleet.list({ limit: 500 }, caller).jobs.filter(job => mayRead(job, caller));
+  const listJobs = (extra: Extra | undefined): JobSummaryV2[] => {
+    const caller = callerOf(extra);
+    return fleet.list({ limit: 500 }, caller).jobs.filter(job => mayRead(job, caller));
+  };
   const outputTemplate = new ResourceTemplate("agtop://jobs/{jobId}/output/{stream}", {
-    list: () => ({ resources: listJobs().map(job => ({ uri: outputUri(job.jobId, "both"), name: `${job.jobId} output`, mimeType: "application/json" })) }),
+    list: (extra) => ({ resources: listJobs(extra).map(job => ({ uri: outputUri(job.jobId, "both"), name: `${job.jobId} output`, mimeType: "application/json" })) }),
   });
   const eventsTemplate = new ResourceTemplate("agtop://jobs/{jobId}/events", {
-    list: () => ({ resources: listJobs().map(job => ({ uri: eventsUri(job.jobId), name: `${job.jobId} events`, mimeType: "application/json" })) }),
+    list: (extra) => ({ resources: listJobs(extra).map(job => ({ uri: eventsUri(job.jobId), name: `${job.jobId} events`, mimeType: "application/json" })) }),
   });
 
   const sinceOf = (value: string | string[] | undefined): number => {
@@ -503,7 +509,8 @@ export function registerFleetResources(server: McpServer, fleet: FleetService): 
     if (!Number.isInteger(since) || since < 0) throw new Error("agtop: E_INVALID_REQUEST: since must be a non-negative integer.");
     return since;
   };
-  const outputRead = (uri: URL, variables: Record<string, string | string[]>, cursor: boolean) => {
+  const outputRead = (uri: URL, variables: Record<string, string | string[]>, cursor: boolean, extra: Extra) => {
+    const caller = callerOf(extra);
     const jobId = String(Array.isArray(variables.jobId) ? variables.jobId[0] : variables.jobId);
     const stream = String(Array.isArray(variables.stream) ? variables.stream[0] : variables.stream);
     try {
@@ -519,7 +526,8 @@ export function registerFleetResources(server: McpServer, fleet: FleetService): 
       throw new Error(readFailure(error, jobId));
     }
   };
-  const eventsRead = (uri: URL, variables: Record<string, string | string[]>, cursor: boolean) => {
+  const eventsRead = (uri: URL, variables: Record<string, string | string[]>, cursor: boolean, extra: Extra) => {
+    const caller = callerOf(extra);
     const jobId = String(Array.isArray(variables.jobId) ? variables.jobId[0] : variables.jobId);
     try {
       const page = fleet.events(jobId, { ...(cursor ? { since: sinceOf(variables.since) } : {}), limit: 200 }, caller);
@@ -531,15 +539,15 @@ export function registerFleetResources(server: McpServer, fleet: FleetService): 
   };
 
   server.registerResource("job-output", outputTemplate, { description: "Captured stdout/stderr for one job.", mimeType: "application/json" },
-    (uri, variables) => outputRead(uri, variables, false));
+    (uri, variables, extra) => outputRead(uri, variables, false, extra));
   server.registerResource("job-output-since", new ResourceTemplate("agtop://jobs/{jobId}/output/{stream}/{since}", { list: undefined }),
     { description: "Captured stdout/stderr after a sequence number.", mimeType: "application/json" },
-    (uri, variables) => outputRead(uri, variables, true));
+    (uri, variables, extra) => outputRead(uri, variables, true, extra));
   server.registerResource("job-events", eventsTemplate, { description: "Lifecycle timeline for one job.", mimeType: "application/json" },
-    (uri, variables) => eventsRead(uri, variables, false));
+    (uri, variables, extra) => eventsRead(uri, variables, false, extra));
   server.registerResource("job-events-since", new ResourceTemplate("agtop://jobs/{jobId}/events/{since}", { list: undefined }),
     { description: "Lifecycle timeline after a sequence number.", mimeType: "application/json" },
-    (uri, variables) => eventsRead(uri, variables, true));
+    (uri, variables, extra) => eventsRead(uri, variables, true, extra));
 
   server.server.setRequestHandler(SubscribeRequestSchema, (request) => { subscriptions.add(request.params.uri); return {}; });
   server.server.setRequestHandler(UnsubscribeRequestSchema, (request) => { subscriptions.delete(request.params.uri); return {}; });

@@ -378,3 +378,33 @@ test("a v0.1-style run is never queued", async () => {
     body(await invoke(session, "kill", { jobId: id }));
   });
 }, 30000);
+
+test("resources apply the same peer visibility as the tools", async () => {
+  const a = await openSession(), b = await openSession();
+  try {
+    const id = jobId("peer-visible");
+    body<RunBody>(await invoke(a, "run", { command: process.execPath, args: ["-e", printer("peer-line")], jobId: id, visibility: "peer" }));
+    body<WaitBody>(await invoke(a, "wait", { jobId: id, timeoutMs: 15000 }));
+    // Both sessions share the AGTOP_PEER label, so the tool and the resource must both allow the read.
+    expect(body<OutputBody>(await invoke(b, "output", { jobId: id })).text).toContain("peer-line");
+    const read = await b.client.readResource({ uri: `agtop://jobs/${id}/output/both` }, { timeout: 5000 });
+    expect(contentText(read.contents)).toContain("peer-line");
+    expect((await b.client.listResources()).resources.map(resource => resource.uri)).toContain(`agtop://jobs/${id}/output/both`);
+  } finally {
+    for (const session of [a, b]) {
+      try { await session.client.callTool({ name: "cleanup", arguments: {} }); } catch { /* shutting down */ }
+      await session.close();
+    }
+  }
+}, 45000);
+
+test("cleanup records killed jobs with reason cleanup", async () => {
+  await withSession(async session => {
+    const id = jobId("cleanup-reason");
+    body<RunBody>(await invoke(session, "run", { command: process.execPath, args: ["-e", sleeper(marker("cleanup-reason"))], jobId: id }));
+    body(await invoke(session, "cleanup"));
+    const events = body<EventsBody>(await invoke(session, "events", { jobId: id, types: ["state"] }));
+    const killed = events.events.find(event => event.state === "killed") as { reason?: string } | undefined;
+    expect(killed?.reason).toBe("cleanup");
+  });
+}, 30000);

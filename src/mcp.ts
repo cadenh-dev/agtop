@@ -38,7 +38,7 @@ export async function startMcpServer(options: { peer?: string } = {}): Promise<v
       trees: listAgentTrees,
     };
     registerFleetTools(server, fleet, helpers);
-    resources = registerFleetResources(server, fleet);
+    resources = registerFleetResources(server, fleet, helpers);
 
     server.registerTool("harnesses", {
       title: "Search harnesses",
