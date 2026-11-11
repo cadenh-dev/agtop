@@ -316,16 +316,17 @@ export class FleetService {
     return { ...page, events: page.events.map(blankTokenHash) };
   }
 
-  async kill(jobId: string, caller: Caller, detail?: string): Promise<{ job: JobSummaryV2; result: KillResult | null }> {
+  /** `reason` "cleanup" is for the MCP cleanup tool (contracts 13.7); everything else is kill-requested. */
+  async kill(jobId: string, caller: Caller, detail?: string, reason: "kill-requested" | "cleanup" = "kill-requested"): Promise<{ job: JobSummaryV2; result: KillResult | null }> {
     const record = this.record(jobId);
     assertAllowed("kill", record, caller);
     const text = detail?.slice(0, 500);
     if (caller.kind === "admin") audit({ event: "admin-kill", actor: "admin", jobId, ...(text === undefined ? {} : { detail: text }) });
     if (isTerminal(record.state)) return { job: this.summary(record, caller), result: null };
     let result: KillResult | null = null;
-    if (this.deps.runtime.supervises(jobId)) result = await this.deps.runtime.kill(jobId, "kill-requested", text);
+    if (this.deps.runtime.supervises(jobId)) result = await this.deps.runtime.kill(jobId, reason, text);
     else {
-      writeKillRequest(jobId, { by: actorOf(caller), reason: "kill-requested", at: new Date().toISOString(), ...(text === undefined ? {} : { detail: text }) });
+      writeKillRequest(jobId, { by: actorOf(caller), reason, at: new Date().toISOString(), ...(text === undefined ? {} : { detail: text }) });
       if (record.state === "starting" || record.state === "running" || record.state === "exiting") {
         // A foreign job still starting may not have a process tree yet; the marker already makes its
         // supervisor record killed, so "not found" there is not an error.
