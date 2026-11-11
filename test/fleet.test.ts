@@ -10,6 +10,7 @@ import { FleetError } from "../src/fleet-errors.js";
 import { readKillRequest, selfSupervisor, type SessionIdentity } from "../src/job-runtime.js";
 import type { Caller } from "../src/ownership.js";
 import { DEFAULT_ADMISSION_POLICY } from "../src/policy.js";
+import { withFleetLock } from "../src/reconcile.js";
 import type { CaptureProvider, FleetSurface, ManagedAgent, SpawnAgentOptions, StateEvent } from "../src/types.js";
 
 let root = "", previousStateDir: string | undefined;
@@ -97,6 +98,7 @@ test("every submit validation failure names its field", async () => {
     ["resources", { resources: { other: true } }], ["resources", { resources: "x" }], ["leasePorts", { leasePorts: [0] }],
     ["leasePorts", { leasePorts: [1, 1] }], ["leasePorts", { leasePorts: Array(9).fill(1) }], ["leasePorts", { leasePorts: "x" }],
     ["leaseTtlMs", { leaseTtlMs: 9_999 }], ["timeoutMs", { timeoutMs: -1 }], ["maxQueueMs", { maxQueueMs: 604_800_001 }], ["extra", { extra: true }],
+    ["lemonadeUrl", { lemonadeUrl: "x".repeat(2049) }], ["cgroupRoot", { cgroupRoot: "x".repeat(4097) }],
   ];
   for (const [field, request] of cases) {
     const error = await service.submit({ command: "echo", ...request } as SubmitJobRequest, caller).catch((caught) => caught);
@@ -104,7 +106,7 @@ test("every submit validation failure names its field", async () => {
     expect(error).toMatchObject({ code: "E_INVALID_REQUEST", details: { field } });
   }
   const peer: Caller = { kind: "peer", peer: { id: "peer-a", url: "https://a", publicKey: "", scopes: [], jobPeerPrefixes: [], enabled: true, addedAt: "", lastSeenAt: null } };
-  for (const [field, request] of [["redact", { redact: false }], ["extraEnv", { extraEnv: { A: "b" } }], ["cgroupRoot", { cgroupRoot: "/x" }]] as const) {
+  for (const [field, request] of [["redact", { redact: false }], ["extraEnv", { extraEnv: { A: "b" } }], ["cgroupRoot", { cgroupRoot: "/x" }], ["peer", { peer: `peer:peer-a-${"x".repeat(250)}` }]] as const) {
     const error = await service.submit({ command: "echo", ...request } as SubmitJobRequest, peer).catch((caught) => caught);
     expect(error).toMatchObject({ code: "E_INVALID_REQUEST", details: { field } });
   }
@@ -205,6 +207,24 @@ test("close terminates only jobs this process supervises", async () => {
   await b.submit({ command: "echo", jobId: "b-job" }, asSession(b));
   await a.close();
   expect(a.get("a-job", admin).job.state).toBe("killed"); expect(b.get("b-job", admin).job.state).toBe("running");
+});
+
+test("close during an admission pass waiting for the fleet lock starts nothing afterwards", async () => {
+  const service = await openFleet("library", identity("session-a"));
+  let release!: () => void;
+  const held = withFleetLock(() => new Promise<void>((resolve) => { release = resolve; }));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // Queued admission triggers a scheduler tick that now waits for the lock; close() races it.
+  await service.submit({ command: "echo", jobId: "racing", priority: 1 }, asSession(service));
+  const closing = service.close();
+  setTimeout(() => release(), 100);
+  await closing; await held;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  // shutdown() cancels own queued jobs, so the job ends killed; it must never have been started.
+  const states = service.events("racing", {}, admin).events.flatMap((event) => (event.type === "state" ? [event.state] : []));
+  expect(states).not.toContain("starting");
+  expect(service.get("racing", admin).job.state).toBe("killed");
+  await expect(service.submit({ command: "echo" }, asSession(service))).rejects.toMatchObject({ code: "E_INTERNAL" });
 });
 
 test("redact:false stores raw output, records it, and audits once", async () => {

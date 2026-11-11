@@ -173,6 +173,7 @@ export class FleetService {
 
   /** Validates, records and either starts the job at once or durably queues it (contracts 8.7). */
   async submit(request: SubmitJobRequest, caller: Caller): Promise<JobSummaryV2> {
+    if (this.deps.lifecycle.closed) throw new FleetError("E_INTERNAL", "FleetService is closed.");
     if (typeof request !== "object" || request === null) throw invalid("request", "submit requires an object.");
     for (const key of Object.keys(request)) if (!SUBMIT_FIELDS.has(key)) throw invalid(key, `Unknown submit property: ${key}.`);
     this.deps.index.refresh(); const policy = this.deps.policy.current, jobId = this.jobIdField(request.jobId);
@@ -202,8 +203,8 @@ export class FleetService {
     const timeoutMs = optionalInt(request.timeoutMs, "timeoutMs", 0, TIME_MAX, 0), maxQueueMs = optionalInt(request.maxQueueMs, "maxQueueMs", 0, TIME_MAX, 0);
     const extraEnv = envField(request.extraEnv), useLemonadeLocal = optionalBool(request.useLemonadeLocal, "useLemonadeLocal", false);
     const lemonadeUrl = request.lemonadeUrl, cgroupRoot = request.cgroupRoot;
-    if (lemonadeUrl !== undefined && typeof lemonadeUrl !== "string") throw invalid("lemonadeUrl", "lemonadeUrl must be a string.");
-    if (cgroupRoot !== undefined && typeof cgroupRoot !== "string") throw invalid("cgroupRoot", "cgroupRoot must be a string.");
+    if (lemonadeUrl !== undefined && (typeof lemonadeUrl !== "string" || lemonadeUrl.length > 2048)) throw invalid("lemonadeUrl", "lemonadeUrl must be a string of at most 2048 characters.");
+    if (cgroupRoot !== undefined && (typeof cgroupRoot !== "string" || cgroupRoot.length > 4096)) throw invalid("cgroupRoot", "cgroupRoot must be a string of at most 4096 characters.");
     if (caller.kind === "peer" && (!redact || request.extraEnv !== undefined || request.cgroupRoot !== undefined)) {
       throw invalid(!redact ? "redact" : request.extraEnv !== undefined ? "extraEnv" : "cgroupRoot", "peer submissions may not disable redaction or set extraEnv or cgroupRoot.");
     }
@@ -253,7 +254,10 @@ export class FleetService {
       startPromise = this.deps.runtime.start(jobId);
     });
     if (startPromise === undefined) throw new FleetError("E_INTERNAL", "Job was not started.");
-    await startPromise;
+    try { await startPromise; } catch (error) {
+      this.deps.leases.releaseJob(jobId); // idempotent; beforeTerminal normally released them already
+      throw error;
+    }
     return this.summary(this.deps.index.get(jobId) ?? record, caller);
   }
 
@@ -318,7 +322,11 @@ export class FleetService {
     if (this.deps.runtime.supervises(jobId)) result = await this.deps.runtime.kill(jobId, "kill-requested", text);
     else {
       writeKillRequest(jobId, { by: actorOf(caller), reason: "kill-requested", at: new Date().toISOString(), ...(text === undefined ? {} : { detail: text }) });
-      if (record.state === "starting" || record.state === "running" || record.state === "exiting") result = await killAgentTree(jobId);
+      if (record.state === "starting" || record.state === "running" || record.state === "exiting") {
+        // A foreign job still starting may not have a process tree yet; the marker already makes its
+        // supervisor record killed, so "not found" there is not an error.
+        try { result = await killAgentTree(jobId); } catch (error) { if (record.state !== "starting") throw error; }
+      }
     }
     this.deps.index.refresh();
     return { job: this.summary(this.deps.index.get(jobId) ?? record, caller), result };
@@ -350,6 +358,8 @@ export class FleetService {
     if (this.deps.lifecycle.closed) return;
     this.deps.lifecycle.closed = true;
     this.deps.scheduler.stop();
+    // shutdown() also cancels own queued jobs, and start() refuses a job that is no longer queued,
+    // so an admission pass still in flight cannot start anything after this; submit() refuses too.
     await this.deps.runtime.shutdown();
     this.hydrated.clear();
   }
@@ -390,7 +400,7 @@ export class FleetService {
   private peerField(value: unknown, caller: Caller): string {
     if (caller.kind === "peer") {
       const forced = `peer:${caller.peer.id}`;
-      if (value !== undefined && typeof value !== "string") throw invalid("peer", "peer must be a string.");
+      if (value !== undefined && (typeof value !== "string" || value.length > 200)) throw invalid("peer", "peer must be a string of at most 200 characters.");
       return typeof value === "string" && value.startsWith(forced) ? value : forced;
     }
     return value === undefined ? (caller.kind === "session" ? peerLabel(caller.peer) : peerLabel(os.userInfo().username)) : peerLabel(value);
