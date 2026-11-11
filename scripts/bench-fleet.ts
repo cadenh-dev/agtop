@@ -305,7 +305,7 @@ export async function measureP2(): Promise<P2Result> {
         return {
           http: httpResult,
           mcp: { count: mcpLatency.count, p50: mcpLatency.p50, p95: mcpLatency.p95, max: mcpLatency.max, jobs: mcpJobs, fleetJobs: mcpFleetJobs },
-          pass: httpResult.pass && listedJobs === 50 && mcpFleetJobs === 50,
+          pass: httpResult.pass && listedJobs === 50 && mcpFleetJobs === 50 && mcpLatency.pass,
         };
       } finally { await session.close(); }
     } finally { await daemon.close(); }

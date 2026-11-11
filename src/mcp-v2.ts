@@ -22,6 +22,8 @@ export interface FleetToolHelpers {
   peerFor(extra: { _meta?: Record<string, unknown> }, requested?: string): string;
   /** The process snapshot for status and list (never called on a scheduler or lease path). */
   trees(): Promise<AgentProcessTree[]>;
+  /** Drops a cached snapshot after this session starts, stops or waits on a job. */
+  invalidateTrees?(): void;
 }
 
 export interface FleetResources {
@@ -219,6 +221,7 @@ export function registerFleetTools(server: McpServer, fleet: FleetService, helpe
         leasePorts: input.leasePorts, resources: input.resources, timeoutMs: input.timeoutMs, visibility: input.visibility,
       }, caller);
       notifiers.get(server)?.jobCreated(submitted.jobId);
+      helpers.invalidateTrees?.();
       const view = await queuedView(submitted.jobId, caller);
       if (view.job.state === "queued") {
         return text({
@@ -310,6 +313,7 @@ export function registerFleetTools(server: McpServer, fleet: FleetService, helpe
       const view = fleet.get(jobId, caller);
       if (!view.job.owned) return failure("agtop: only jobs created by this MCP session can be awaited.");
       const result = await fleet.wait(jobId, timeoutMs ?? 60_000);
+      helpers.invalidateTrees?.();
       return text({
         jobId, exited: result.exited, ...(result.timedOut ? { timedOut: true as const } : {}),
         ...(result.exited ? { exitCode: result.exitCode } : {}), state: result.state,
@@ -340,6 +344,7 @@ export function registerFleetTools(server: McpServer, fleet: FleetService, helpe
       if (isTerminal(view.job.state)) return text({ jobId, alreadyExited: true, exitCode: view.job.exitCode });
       const wasQueued = view.job.state === "queued";
       const killed = await fleet.kill(jobId, caller);
+      helpers.invalidateTrees?.();
       if (wasQueued) return text({ jobId, cancelled: true, state: killed.job.state });
       if (killed.result === null) {
         if (isTerminal(killed.job.state)) return text({ jobId, alreadyExited: true, exitCode: killed.job.exitCode });
@@ -364,6 +369,7 @@ export function registerFleetTools(server: McpServer, fleet: FleetService, helpe
       if (isTerminal(job.state)) return { jobId: job.jobId, alreadyExited: true, exitCode: job.exitCode };
       try {
         const killed = await fleet.kill(job.jobId, caller, undefined, "cleanup");
+        helpers.invalidateTrees?.();
         if (job.state === "queued") return { jobId: job.jobId, cancelled: true, state: killed.job.state };
         return { jobId: job.jobId, ...(killed.result ?? {}) };
       } catch (error) {

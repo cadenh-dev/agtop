@@ -41,9 +41,10 @@ heavyTest("P2: list of 50 jobs stays under 250 ms over HTTP; MCP list returns al
   expect(result.http.jobs).toBe(50);
   expect(result.http.p95).toBeLessThan(BUDGETS.p2P95Ms);
   expect(result.http.pass).toBe(true);
-  // MCP `list` includes the v0.1 process scan (listAgentTrees), so it is measured and reported here.
+  // MCP `list` shares one process scan for 2 s (lead decision D41), so it is gated like HTTP.
   expect(result.mcp.fleetJobs).toBe(50);
   expect(result.mcp.count).toBe(20);
+  expect(result.mcp.p95).toBeLessThan(BUDGETS.p2P95Ms);
 }, 240_000);
 
 heavyTest("P3: 20 concurrent 2 MiB jobs stay under the RSS and retained-bytes budgets", async () => {
