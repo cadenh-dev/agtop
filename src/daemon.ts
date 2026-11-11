@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -10,6 +10,11 @@ import { FleetService } from "./fleet.js";
 import { FleetError, FLEET_ERROR_STATUS } from "./fleet-errors.js";
 import { harnessCatalog } from "./harnesses.js";
 import { stateDir } from "./registry.js";
+import { PeerAuth } from "./remote/auth.js";
+import { RemoteProxy } from "./remote/proxy.js";
+import { PeerRegistry } from "./remote/registry.js";
+import { handleRemoteRoute } from "./remote/routes.js";
+import { startFederationListener, type FederationListener } from "./remote/server.js";
 import type { ManagedAgent, SpawnAgentOptions } from "./types.js";
 
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -47,8 +52,14 @@ export async function startDaemon(options: {
   const agents = new Map<string, ManagedAgent>();
   // A failure after this point must not leave the fleet scheduler's timer running (contracts 8.7).
   const fleet = await FleetService.open({ surface: "daemon" });
+  // One registry and one proxy per daemon; the federation listener and /v1/remote share them (9.3, 11.3).
+  const registry = new PeerRegistry();
+  const proxy = new RemoteProxy(registry);
+  let server: Server | undefined;
+  let tokenFile: string | undefined;
+  let federation: FederationListener | undefined;
   try {
-    const server = createServer(async (req, res) => {
+    server = createServer(async (req, res) => {
       res.setHeader("Content-Type", "application/json"); res.setHeader("Cache-Control", "no-store");
       const reply = (code: number, value: unknown) => { res.writeHead(code); res.end(JSON.stringify(value)); };
       const received = Buffer.from(req.headers.authorization || "");
@@ -58,12 +69,16 @@ export async function startDaemon(options: {
         // A valid bearer token is Caller { kind: "admin" } (contracts 9). Fleet paths fall through
         // to the unchanged v0.1 routes when handleFleetRoute returns undefined.
         const url = req.url || "", queryAt = url.indexOf("?");
-        const routed = await handleFleetRoute(fleet, {
+        const route = {
           method: req.method ?? "", path: queryAt === -1 ? url : url.slice(0, queryAt),
           query: new URLSearchParams(queryAt === -1 ? "" : url.slice(queryAt + 1)),
           readBody: () => fleetBody(req),
-        });
+        };
+        const routed = await handleFleetRoute(fleet, route);
         if (routed !== undefined) { reply(routed.status, routed.body); return; }
+        // Peers and the remote proxy come after fleet routes and before the v0.1 routes (contracts 9.3).
+        const remote = await handleRemoteRoute({ registry, proxy }, route);
+        if (remote !== undefined) { reply(remote.status, remote.body); return; }
         if (req.method === "GET" && req.url === "/v1/harnesses") { reply(200, harnessCatalog()); return; }
         if (req.method === "GET" && req.url === "/v1/agents") { reply(200, await listAgentTrees()); return; }
         if (req.method === "GET" && req.url === "/v1/accelerators") {
@@ -93,32 +108,55 @@ export async function startDaemon(options: {
         reply(400, { error: e instanceof Error ? e.message : String(e) });
       }
     });
-    server.requestTimeout = 10000; server.headersTimeout = 10000;
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", () => { server.off("error", reject); resolve(); }); });
-    const address = server.address();
+    const active = server;
+    active.requestTimeout = 10000; active.headersTimeout = 10000;
+    await new Promise<void>((resolve, reject) => { active.once("error", reject); active.listen(port, "127.0.0.1", () => { active.off("error", reject); resolve(); }); });
+    const address = active.address();
     if (!address || typeof address === "string") throw new Error("No TCP address.");
-    const tokenFile = path.join(stateDir(), `daemon-${address.port}.token`);
+    const tokenPath = path.join(stateDir(), `daemon-${address.port}.token`);
+    tokenFile = tokenPath;
     try {
       fs.mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(tokenFile, token, { mode: 0o600 });
-      if (process.platform !== "win32") fs.chmodSync(tokenFile, 0o600);
-    } catch (e) { server.close(); throw e; }
+      fs.writeFileSync(tokenPath, token, { mode: 0o600 });
+      if (process.platform !== "win32") fs.chmodSync(tokenPath, 0o600);
+    } catch (e) { active.close(); throw e; }
+    // The federation listener shares this daemon's fleet, peer registry and signing keys (11.3).
+    if (options.federation !== undefined) {
+      const settings = options.federation;
+      federation = await startFederationListener({
+        fleet, registry, auth: new PeerAuth(registry), port: settings.port,
+        ...(settings.host === undefined ? {} : { host: settings.host }),
+        certFile: settings.certFile, keyFile: settings.keyFile,
+      });
+    }
     // Concurrent or repeated close() calls share one shutdown.
     let closing: Promise<void> | undefined;
-    return { port: address.port, tokenFile, close: () => closing ??= (async () => {
-      const stopped = new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve()));
-      server.closeIdleConnections();
-      await stopped;
+    return { port: address.port, tokenFile: tokenPath, close: () => closing ??= (async () => {
+      const failures: unknown[] = [];
+      try { if (federation !== undefined) await federation.close(); } catch (e) { failures.push(e); }
+      try {
+        const stopped = new Promise<void>((resolve, reject) => active.close(e => e ? reject(e) : resolve()));
+        active.closeIdleConnections();
+        await stopped;
+      } catch (e) { failures.push(e); }
       try {
         const results = await Promise.allSettled([...agents.values()].map(a => a.terminate()));
-        const failures = results.filter(r => r.status === "rejected" || r.value.failedPids.length || r.value.errors.length);
-        if (failures.length) throw new Error(`Failed to clean up ${failures.length} daemon job(s).`);
-      } finally {
-        // Fleet shutdown is always awaited; the token file is removed even if it throws.
-        try { await fleet.close(); } finally { fs.rmSync(tokenFile, { force: true }); }
-      }
+        const failed = results.filter(r => r.status === "rejected" || r.value.failedPids.length || r.value.errors.length);
+        if (failed.length) failures.push(new Error(`Failed to clean up ${failed.length} daemon job(s).`));
+      } catch (e) { failures.push(e); }
+      // Fleet shutdown is always awaited; the token file is removed even if it throws.
+      try { await fleet.close(); } catch (e) { failures.push(e); }
+      fs.rmSync(tokenPath, { force: true });
+      if (failures.length > 0) throw failures[0];
     })() };
   } catch (error) {
+    // A failed start leaves nothing behind: listener, federation listener, token file and fleet.
+    if (federation !== undefined) await federation.close().catch(() => undefined);
+    if (server !== undefined) {
+      server.closeIdleConnections();
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+    }
+    if (tokenFile !== undefined) fs.rmSync(tokenFile, { force: true });
     await fleet.close().catch(() => undefined);
     throw error;
   }
