@@ -15,6 +15,7 @@ import type { DaemonPeer } from "../src/types.js";
 // A self-signed P-256 certificate for 127.0.0.1/localhost and its key, generated once with openssl.
 // OTHER_CERT_PEM is a second self-signed certificate with the same subject and key but a different
 // serial, so pinning it verifies the chain and then fails the SHA-256 fingerprint comparison.
+// TEST ONLY: a throwaway self-signed localhost certificate and key for these tests. Never use elsewhere.
 const KEY_PEM = `-----BEGIN EC PRIVATE KEY-----
 MHcCAQEEINn8dG05KSrdT0SGoVTPU1eDeQmpPjc2G9dRstDL/HKxoAoGCCqGSM49
 AwEHoUQDQgAEXKQh50agpfj2LYLgiGpbXZMuG/jJtMfxVsVrFJoO5dFkCjmx7jBj
