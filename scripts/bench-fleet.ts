@@ -157,12 +157,13 @@ async function startSupervisorJob(root: string, jobId: string, command: string, 
   const fleetUrl = pathToFileURL(path.join(REPO_ROOT, "src/fleet.ts")).href;
   fs.writeFileSync(scriptFile, [
     `import * as fs from "node:fs";`,
+    // FleetService.wait uses unref'd timers: without a ref'd handle first, POSIX exits before the job ends.
+    `setInterval(() => {}, 1000);`,
     `const { FleetService } = await import(process.env.AGTOP_FLEET_URL!);`,
     `const service = await FleetService.open({ surface: "library" });`,
     `const job = await service.submit({ jobId: process.env.AGTOP_JOB_ID!, command: process.env.AGTOP_COMMAND!, args: JSON.parse(process.env.AGTOP_ARGS!), cwd: process.env.AGTOP_CWD! }, { kind: "session", session: service.session, peer: "bench" });`,
     `const done = await service.wait(job.jobId, Number(process.env.AGTOP_WAIT_MS));`,
     `fs.writeFileSync(process.env.AGTOP_READY_FILE!, JSON.stringify({ jobId: job.jobId, state: done.state, exitCode: done.exitCode }));`,
-    `setInterval(() => {}, 1000);`,
   ].join("\n"));
   const child = spawn(process.execPath, [scriptFile], {
     env: {
