@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -14,6 +14,10 @@ import { FleetService } from "../src/fleet.js";
 import { selfSupervisor, type SessionIdentity } from "../src/job-runtime.js";
 import type { Caller } from "../src/ownership.js";
 import type { CaptureProvider, ManagedAgent, SpawnAgentOptions } from "../src/types.js";
+
+// Every CLI command opens a FleetService, which takes one process snapshot (~0.7 s on Windows via CIM);
+// tests that run four commands sit near bun's 5 s default (D42).
+setDefaultTimeout(30_000);
 
 let root = "", previousStateDir: string | undefined;
 let service: FleetService | undefined;
