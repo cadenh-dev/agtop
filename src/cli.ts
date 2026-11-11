@@ -8,6 +8,7 @@ import { probeLemonade } from "./backend.js";
 import { startDaemon } from "./daemon.js";
 import { launchDesktop } from "./desktop.js";
 import { fleetCommand } from "./cli-fleet.js";
+import { peersCommand } from "./cli-peers.js";
 import { searchHarnesses } from "./harnesses.js";
 import { ROLE_ORDER, roleCatalog } from "./roles.js";
 import { startMcpServer } from "./mcp.js";
@@ -34,7 +35,12 @@ const help = `agtop — agent-aware process manager
   agtop submit [--port 13309] [options] -- COMMAND [ARGS...]  Submit a fleet job to the daemon
   agtop mcp [--peer NAME]      MCP stdio server for agent-facing task containment
   agtop lemonade [--json]      Probe local server and loaded models
-  agtop daemon [--port 13309]  Authenticated loopback HTTP API
+  agtop daemon [--port 13309] [--federation-port N --tls-cert FILE --tls-key FILE
+                [--federation-host HOST]]  Authenticated loopback HTTP API
+  agtop peers init [--id ID]   Create or show this daemon's Ed25519 identity
+  agtop peers list [--json]    Trusted federation peers
+  agtop peers add --id ID --url URL --public-key KEY [--scope S] [--prefix P] [--tls-cert FILE]
+  agtop peers remove ID        Remove a trusted federation peer
   agtop ui                    Native GPUI desktop interface
 
 run options:
@@ -108,6 +114,36 @@ async function top(interval: number) {
     process.stdout.write("\x1b[?25h\x1b[?1049l"); process.off("SIGINT", stop); process.off("SIGTERM", stop);
     if (process.stdin.isTTY) { process.stdin.off("data", key); process.stdin.setRawMode(wasRaw || false); process.stdin.pause(); }
   }
+}
+const DAEMON_USAGE = "Usage: agtop daemon [--port 13309] [--federation-port N --tls-cert FILE --tls-key FILE [--federation-host HOST]]";
+export interface DaemonCliOptions { port?: number; federation?: { port: number; host?: string; certFile: string; keyFile: string } }
+function portOption(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`${name} must be an integer between 0 and 65535. ${DAEMON_USAGE}`);
+  return port;
+}
+/** `agtop daemon` options in any order (contracts 16); exported so the CLI parser is testable. */
+export function parseDaemonOptions(args: string[]): DaemonCliOptions {
+  const names = new Set(["--port", "--federation-port", "--tls-cert", "--tls-key", "--federation-host"]);
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (!names.has(arg)) throw new Error(`Unknown option: ${arg}. ${DAEMON_USAGE}`);
+    if (values.has(arg)) throw new Error(`Duplicate option: ${arg}. ${DAEMON_USAGE}`);
+    const value = args[index + 1];
+    if (value === undefined) throw new Error(`Missing value for ${arg}. ${DAEMON_USAGE}`);
+    values.set(arg, value); index += 1;
+  }
+  const port = portOption("--port", values.get("--port"));
+  const federationPort = portOption("--federation-port", values.get("--federation-port"));
+  const certFile = values.get("--tls-cert"), keyFile = values.get("--tls-key"), host = values.get("--federation-host");
+  if (federationPort === undefined) {
+    if (certFile !== undefined || keyFile !== undefined || host !== undefined) throw new Error(`--tls-cert, --tls-key and --federation-host require --federation-port. ${DAEMON_USAGE}`);
+    return port === undefined ? {} : { port };
+  }
+  if (certFile === undefined || keyFile === undefined) throw new Error(`--federation-port requires both --tls-cert and --tls-key. ${DAEMON_USAGE}`);
+  return { ...(port === undefined ? {} : { port }), federation: { port: federationPort, ...(host === undefined ? {} : { host }), certFile, keyFile } };
 }
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === WATCHDOG_ARG) { process.exitCode = await runWatchdog(args.slice(1)); return; }
@@ -223,13 +259,14 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "daemon") {
-    if (rest.length && (rest.length !== 2 || rest[0] !== "--port")) throw new Error("Usage: agtop daemon [--port 13309]");
-    const daemon = await startDaemon({ port: rest.length ? Number(rest[1]) : undefined, token: process.env.AGTOP_DAEMON_TOKEN });
+    const options = parseDaemonOptions(rest);
+    const daemon = await startDaemon({ ...options, token: process.env.AGTOP_DAEMON_TOKEN });
     console.error(`agtop daemon: http://127.0.0.1:${daemon.port}\nBearer token file: ${daemon.tokenFile}`);
     let stopping = false;
     const stop = () => { if (!stopping) { stopping = true; void daemon.close().catch(e => { console.error(String(e)); process.exitCode = 1; }).finally(() => { process.off("SIGINT", stop); process.off("SIGTERM", stop); }); } };
     process.on("SIGINT", stop); process.on("SIGTERM", stop); return;
   }
+  if (command === "peers") { await peersCommand(rest); return; }
   if (await fleetCommand(command, rest)) return;
   throw new Error(`Unknown command: ${command}. Use agtop --help.`);
 }
