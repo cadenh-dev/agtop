@@ -112,7 +112,8 @@ impl JobDetail {
             }
             let data = chunk.data.strip_suffix('\n').unwrap_or(&chunk.data);
             for line in data.split('\n') {
-                self.push_line(&chunk.stream, line.to_owned());
+                // Windows children write CRLF; drop the CR so it never reaches the UI.
+                self.push_line(&chunk.stream, line.strip_suffix('\r').unwrap_or(line).to_owned());
             }
         }
         (self.truncation, self.state, self.exit_code) = (page.truncation, page.state, page.exit_code);
