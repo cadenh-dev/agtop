@@ -168,6 +168,7 @@ export class FleetService {
   readonly session: SessionIdentity;
   readonly leases: LeaseManager;
   private readonly deps: ServiceDeps;
+  private closing: Promise<void> | undefined;
   private readonly hydrated = new Map<string, { ring: OutputRingBuffer; stamp: string }>();
   private constructor(deps: ServiceDeps) { this.deps = deps; this.session = deps.session; this.leases = deps.leases; }
 
@@ -357,8 +358,11 @@ export class FleetService {
     audit({ event: "policy-changed", actor: "admin" });
   }
   /** Stops the timer and terminates only the jobs this process supervises (contracts 8.7). */
-  async close(): Promise<void> {
-    if (this.deps.lifecycle.closed) return;
+  close(): Promise<void> {
+    // Concurrent callers share one shutdown, so none resolves before it has finished.
+    return this.closing ??= this.shutdown();
+  }
+  private async shutdown(): Promise<void> {
     this.deps.lifecycle.closed = true;
     this.deps.scheduler.stop();
     // shutdown() also cancels own queued jobs, and start() refuses a job that is no longer queued,

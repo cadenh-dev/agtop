@@ -205,7 +205,9 @@ test("close terminates only jobs this process supervises", async () => {
   const b = await openFleet("library", identity("session-b"));
   await a.submit({ command: "echo", jobId: "a-job" }, asSession(a));
   await b.submit({ command: "echo", jobId: "b-job" }, asSession(b));
-  await a.close();
+  const [first, second] = [a.close(), a.close()];
+  expect(second).toBe(first); // concurrent callers share one shutdown
+  await second;
   expect(a.get("a-job", admin).job.state).toBe("killed"); expect(b.get("b-job", admin).job.state).toBe("running");
 });
 
