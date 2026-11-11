@@ -159,11 +159,22 @@ async function startSupervisorJob(root: string, jobId: string, command: string, 
     `import * as fs from "node:fs";`,
     // FleetService.wait uses unref'd timers: without a ref'd handle first, POSIX exits before the job ends.
     `setInterval(() => {}, 1000);`,
+    // Breadcrumbs: if the supervisor dies, the parent reports the last step it reached.
+    `const step = (name: string): void => { try { fs.appendFileSync(process.env.AGTOP_READY_FILE! + ".steps", name + "\\n"); } catch {} };`,
+    `process.on("exit", (code) => step("exit " + code));`,
+    `for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) process.on(signal, () => { step("signal " + signal); process.exit(128); });`,
+    `try {`,
+    `step("start");`,
     `const { FleetService } = await import(process.env.AGTOP_FLEET_URL!);`,
+    `step("imported");`,
     `const service = await FleetService.open({ surface: "library" });`,
+    `step("opened");`,
     `const job = await service.submit({ jobId: process.env.AGTOP_JOB_ID!, command: process.env.AGTOP_COMMAND!, args: JSON.parse(process.env.AGTOP_ARGS!), cwd: process.env.AGTOP_CWD! }, { kind: "session", session: service.session, peer: "bench" });`,
+    `step("submitted " + job.state);`,
     `const done = await service.wait(job.jobId, Number(process.env.AGTOP_WAIT_MS));`,
+    `step("waited " + done.state);`,
     `fs.writeFileSync(process.env.AGTOP_READY_FILE!, JSON.stringify({ jobId: job.jobId, state: done.state, exitCode: done.exitCode }));`,
+    `} catch (error) { step("error " + (error instanceof Error ? error.stack ?? error.message : String(error)).replace(/\\n/g, " | ")); throw error; }`,
   ].join("\n"));
   const child = spawn(process.execPath, [scriptFile], {
     env: {
@@ -185,7 +196,11 @@ async function startSupervisorJob(root: string, jobId: string, command: string, 
   try {
     const deadline = Date.now() + Math.max(30_000, timeoutMs);
     while (!fs.existsSync(readyFile)) {
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`supervisor ${jobId} exited before its job: ${stderr.trim()}`);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        let steps = "";
+        try { steps = fs.readFileSync(`${readyFile}.steps`, "utf8").trim().replace(/\n/g, " > "); } catch { /* none written */ }
+        throw new Error(`supervisor ${jobId} exited before its job (code ${child.exitCode}, signal ${child.signalCode}; steps: ${steps || "none"}): ${stderr.trim()}`);
+      }
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for supervisor ${jobId}.`);
       await new Promise<void>((resolve) => setTimeout(resolve, 50));
     }
