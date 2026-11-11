@@ -228,3 +228,16 @@ test.skipIf(process.platform === "win32")("the lease file is mode 0600", () => {
   acquire(m, 4000, "job-a");
   expect(fs.statSync(path.join(dir, "4000.json")).mode & 0o777).toBe(0o600);
 });
+
+test("a per-port lock left by a crashed process is taken over after it goes stale", () => {
+  const manager = new LeaseManager({ dir, alive: () => true });
+  const lease = manager.acquire({ port: 3020, jobId: "job-a", peer: "tester", sessionId: "session", holder: { pid: 1, startTime: "1", surface: "library" } });
+  const lock = path.join(dir, "3020.json.rm");
+  fs.writeFileSync(lock, "999999");
+  const old = new Date(Date.now() - 10_000);
+  fs.utimesSync(lock, old, old);
+  manager.release(3020, lease.leaseId);
+  expect(manager.get(3020)).toBeNull();
+  expect(fs.existsSync(lock)).toBe(false);
+  expect(fs.readdirSync(dir).filter((name) => name.includes(".gone."))).toEqual([]);
+});

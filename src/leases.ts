@@ -19,20 +19,63 @@ const UNREADABLE_STALE_MS = 2000;
 function olderThan(file: string, ms: number, nowMs: number): boolean {
   try { return nowMs - fs.statSync(file).mtimeMs >= ms; } catch { return false; }
 }
+/** A removal lock older than this belongs to a process that died while holding it. */
+const MUTATE_LOCK_STALE_MS = 2000, MUTATE_LOCK_WAIT_MS = 5000;
+const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 /**
- * Deletes `file` only if its contents still satisfy `matches`. Read-then-delete would let a slow
- * process delete a lease another process just created, so the file is renamed aside first (only
- * one process can move it), checked, and restored with link() (never overwrites) if it no longer
- * matches. Same approach as the fleet lock takeover in reconcile.ts.
+ * Deletes a file by renaming it to a unique name first. On Windows an unlinked file keeps its
+ * name in a "delete pending" state while any handle is open, and creating that name meanwhile
+ * fails with EPERM; a rename frees the name at once.
  */
-function removeIf(file: string, matches: (raw: string) => boolean): boolean {
+function discard(file: string): boolean {
   const aside = `${file}.gone.${process.pid}.${randomUUID()}`;
   try { fs.renameSync(file, aside); } catch { return false; }
-  try {
-    if (matches(fs.readFileSync(aside, "utf8"))) return true;
-    try { fs.linkSync(aside, file); } catch { /* A newer lease exists; nothing to restore. */ }
-    return false;
-  } catch { return false; } finally { fs.rmSync(aside, { force: true }); }
+  fs.rmSync(aside, { force: true });
+  return true;
+}
+/** createPrivateFileExclusive, but a name that is busy being deleted (Windows EPERM) counts as taken. */
+function tryCreate(file: string, data: string): boolean {
+  try { return createPrivateFileExclusive(file, data); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EACCES" || code === "EBUSY") return false;
+    throw error;
+  }
+}
+/**
+ * Runs fn while holding `<file>.rm`, the per-port lock that every delete or rewrite of a lease file
+ * takes (D29). Creation needs no lock: `wx` only succeeds on an empty path, and the path can only
+ * become empty through a holder of this lock, so read-check-delete under it cannot remove a lease
+ * another process just created. Held for microseconds. Returns undefined if it cannot be taken.
+ */
+function withMutateLock<T>(file: string, fn: () => T): T | undefined {
+  const lock = `${file}.rm`, deadline = Date.now() + MUTATE_LOCK_WAIT_MS;
+  for (;;) {
+    if (tryCreate(lock, String(process.pid))) {
+      try { return fn(); } finally { discard(lock); }
+    }
+    if (olderThan(lock, MUTATE_LOCK_STALE_MS, Date.now())) {
+      // The holder died mid-removal. Move the stale lock aside (one process wins the rename) and
+      // restore it if it turns out to be fresh. Needs a crash plus contenders; same class as D17.
+      const aside = `${lock}.gone.${process.pid}.${randomUUID()}`;
+      try {
+        fs.renameSync(lock, aside);
+        if (!olderThan(aside, MUTATE_LOCK_STALE_MS, Date.now())) { try { fs.linkSync(aside, lock); } catch { /* replaced */ } }
+        fs.rmSync(aside, { force: true });
+      } catch { /* Another waiter moved it. */ }
+      continue;
+    }
+    if (Date.now() >= deadline) return undefined;
+    pause(1);
+  }
+}
+/** Deletes `file` only if its contents still satisfy `matches`, under the per-port lock. */
+function removeIf(file: string, matches: (raw: string) => boolean): boolean {
+  return withMutateLock(file, () => {
+    let raw: string;
+    try { raw = fs.readFileSync(file, "utf8"); } catch { return false; }
+    if (!matches(raw)) return false;
+    return discard(file);
+  }) ?? false;
 }
 const holdsLease = (leaseId: string) => (raw: string): boolean => {
   try { return (JSON.parse(raw) as { leaseId?: unknown } | null)?.leaseId === leaseId; } catch { return false; }
@@ -100,7 +143,7 @@ export class LeaseManager {
     ensurePrivateDir(this.dir);
     const data = JSON.stringify(lease);
     for (let attempt = 0; ; attempt += 1) {
-      if (createPrivateFileExclusive(file, data)) return lease;
+      if (tryCreate(file, data)) return lease;
       // Lost the race: the winner's lease is the holder. An unreadable file is either the winner
       // still writing (it is written right after creation) or garbage that sweep() would remove.
       const winner = this.live(port);
@@ -110,20 +153,27 @@ export class LeaseManager {
       const stale = this.read(port);
       if (stale !== null && this.isDead(stale, this.now())) removeIf(file, holdsLease(stale.leaseId));
       else if (stale === null && olderThan(file, UNREADABLE_STALE_MS, Date.now())) removeIf(file, isUnparseable);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UNREADABLE_RETRY_MS);
+      pause(UNREADABLE_RETRY_MS);
     }
   }
 
   /** Throws E_LEASE_NOT_FOUND, or E_NOT_OWNER when leaseId does not match. */
   renew(port: number, leaseId: string): PortLease {
-    const lease = this.live(port);
-    if (lease === null) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${port}`);
-    if (lease.leaseId !== leaseId) throw new FleetError("E_NOT_OWNER", `Lease ${leaseId} does not hold port ${port}`);
-    const nowMs = this.now();
-    const renewed: PortLease = { ...lease, renewedAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + lease.ttlMs).toISOString() };
-    ensurePrivateDir(this.dir);
-    writePrivateFileAtomic(this.file(port), JSON.stringify(renewed));
-    return renewed;
+    if (!isPort(port)) throw new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${String(port)}`);
+    // D24/D29: check and rewrite under the per-port lock, so a holder stalled across its own expiry
+    // cannot overwrite a lease another process took over in the meantime.
+    const result = withMutateLock(this.file(port), (): PortLease | FleetError => {
+      const lease = this.live(port);
+      if (lease === null) return new FleetError("E_LEASE_NOT_FOUND", `No lease for port ${port}`);
+      if (lease.leaseId !== leaseId) return new FleetError("E_NOT_OWNER", `Lease ${leaseId} does not hold port ${port}`);
+      const nowMs = this.now();
+      const renewed: PortLease = { ...lease, renewedAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + lease.ttlMs).toISOString() };
+      writePrivateFileAtomic(this.file(port), JSON.stringify(renewed));
+      return renewed;
+    });
+    if (result === undefined) throw new FleetError("E_INTERNAL", `Lease file for port ${port} is locked`);
+    if (result instanceof FleetError) throw result;
+    return result;
   }
 
   release(port: number, leaseId: string): void {
