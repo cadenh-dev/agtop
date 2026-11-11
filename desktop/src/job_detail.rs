@@ -43,7 +43,11 @@ pub fn is_terminal(state: &str) -> bool {
 }
 
 /// One marker line per truncated chunk, matching the daemon's text rendering.
-pub fn truncation_marker(stream: &str, info: Option<&TruncationInfo>, chunk: &OutputChunk) -> String {
+pub fn truncation_marker(
+    stream: &str,
+    info: Option<&TruncationInfo>,
+    chunk: &OutputChunk,
+) -> String {
     match info {
         Some(info) => format!(
             "[agtop: {} bytes of {} dropped (seq {}-{})]",
@@ -88,8 +92,13 @@ pub struct JobDetail {
 impl JobDetail {
     pub fn new(job_id: impl Into<String>) -> Self {
         Self {
-            job_id: job_id.into(), lines: VecDeque::new(), events: Vec::new(),
-            truncation: Truncation::default(), state: String::new(), exit_code: None, unavailable: None,
+            job_id: job_id.into(),
+            lines: VecDeque::new(),
+            events: Vec::new(),
+            truncation: Truncation::default(),
+            state: String::new(),
+            exit_code: None,
+            unavailable: None,
         }
     }
 
@@ -113,10 +122,14 @@ impl JobDetail {
             let data = chunk.data.strip_suffix('\n').unwrap_or(&chunk.data);
             for line in data.split('\n') {
                 // Windows children write CRLF; drop the CR so it never reaches the UI.
-                self.push_line(&chunk.stream, line.strip_suffix('\r').unwrap_or(line).to_owned());
+                self.push_line(
+                    &chunk.stream,
+                    line.strip_suffix('\r').unwrap_or(line).to_owned(),
+                );
             }
         }
-        (self.truncation, self.state, self.exit_code) = (page.truncation, page.state, page.exit_code);
+        (self.truncation, self.state, self.exit_code) =
+            (page.truncation, page.state, page.exit_code);
     }
 
     pub fn apply_events(&mut self, page: EventsPage) {
@@ -132,32 +145,73 @@ impl JobDetail {
 }
 
 fn caption(text: impl Into<SharedString>) -> Div {
-    div().text_size(px(12.)).text_color(color(MUTED)).child(text.into())
+    div()
+        .text_size(px(12.))
+        .text_color(color(MUTED))
+        .child(text.into())
 }
 
 fn scroll_box(id: impl Into<ElementId>, max_height: f32) -> Stateful<Div> {
-    div().id(id).max_h(px(max_height)).overflow_y_scroll().p_2().rounded_md().border_1()
-        .border_color(color(LINE)).bg(color(BACKGROUND)).text_size(px(11.)).font_family(MONO)
+    div()
+        .id(id)
+        .max_h(px(max_height))
+        .overflow_y_scroll()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(color(LINE))
+        .bg(color(BACKGROUND))
+        .text_size(px(11.))
+        .font_family(MONO)
 }
 
 /// Detail pane rendered below the process tree.
 pub fn render(detail: Option<&JobDetail>, job_id: &str) -> Stateful<Div> {
-    let mut pane = div().id("job-detail").mt_5().pt_4().border_t_1().border_color(color(LINE)).flex()
-        .flex_col().gap_3()
-        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Captured output"));
+    let mut pane = div()
+        .id("job-detail")
+        .mt_5()
+        .pt_4()
+        .border_t_1()
+        .border_color(color(LINE))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .text_size(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Captured output"),
+        );
     let Some(detail) = detail.filter(|detail| detail.job_id == job_id) else {
         return pane.child(caption("Output loads after the first poll."));
     };
-    let state = if detail.state.is_empty() { "unknown" } else { detail.state.as_str() };
+    let state = if detail.state.is_empty() {
+        "unknown"
+    } else {
+        detail.state.as_str()
+    };
     let tone = match state {
         "failed" | "killed" | "lost" => DANGER,
         "running" => ACCENT,
         _ => MUTED,
     };
-    let exit = detail.exit_code.map(|code| format!("   Exit code: {code}")).unwrap_or_default();
-    pane = pane.child(div().text_size(px(13.)).text_color(color(tone)).child(format!("State: {state}{exit}")));
+    let exit = detail
+        .exit_code
+        .map(|code| format!("   Exit code: {code}"))
+        .unwrap_or_default();
+    pane = pane.child(
+        div()
+            .text_size(px(13.))
+            .text_color(color(tone))
+            .child(format!("State: {state}{exit}")),
+    );
     if let Some(message) = &detail.unavailable {
-        return pane.child(div().text_size(px(13.)).text_color(color(DANGER)).child(message.clone()));
+        return pane.child(
+            div()
+                .text_size(px(13.))
+                .text_color(color(DANGER))
+                .child(message.clone()),
+        );
     }
     if let Some(summary) = truncation_summary(&detail.truncation) {
         pane = pane.child(caption(summary));
@@ -191,25 +245,47 @@ pub fn render(detail: Option<&JobDetail>, job_id: &str) -> Stateful<Div> {
         .collect::<Vec<_>>()
         .join("\n");
     pane.child(output)
-        .child(div().mt_2().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Events"))
+        .child(
+            div()
+                .mt_2()
+                .text_size(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Events"),
+        )
         .child(scroll_box("job-events", 160.).child(events))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{JobDetail, MAX_LINES, advance_cursor, is_terminal, output_request, truncation_summary};
+    use super::{
+        JobDetail, MAX_LINES, advance_cursor, is_terminal, output_request, truncation_summary,
+    };
     use crate::model::{OutputChunk, OutputPage, Truncation, TruncationInfo};
 
     fn chunk(seq: u64, stream: &str, data: &str) -> OutputChunk {
-        OutputChunk { seq, stream: stream.into(), data: data.into(), ..Default::default() }
+        OutputChunk {
+            seq,
+            stream: stream.into(),
+            data: data.into(),
+            ..Default::default()
+        }
     }
 
     fn page(job_id: &str, state: &str, chunks: Vec<OutputChunk>) -> OutputPage {
-        OutputPage { job_id: job_id.into(), state: state.into(), chunks, ..Default::default() }
+        OutputPage {
+            job_id: job_id.into(),
+            state: state.into(),
+            chunks,
+            ..Default::default()
+        }
     }
 
     fn info(first: u64, last: u64, bytes: u64) -> TruncationInfo {
-        TruncationInfo { first_dropped_seq: first, last_dropped_seq: last, dropped_bytes: bytes }
+        TruncationInfo {
+            first_dropped_seq: first,
+            last_dropped_seq: last,
+            dropped_bytes: bytes,
+        }
     }
 
     #[test]
@@ -224,8 +300,10 @@ mod tests {
         assert_eq!(
             detail.lines.iter().cloned().collect::<Vec<_>>(),
             vec![
-                ("stdout".to_owned(), "one".to_owned()), ("stdout".to_owned(), "two".to_owned()),
-                ("stderr".to_owned(), "bad".to_owned()), ("stdout".to_owned(), "three".to_owned()),
+                ("stdout".to_owned(), "one".to_owned()),
+                ("stdout".to_owned(), "two".to_owned()),
+                ("stderr".to_owned(), "bad".to_owned()),
+                ("stdout".to_owned(), "three".to_owned()),
             ]
         );
         assert_eq!((detail.state.as_str(), detail.exit_code), ("running", None));
@@ -236,7 +314,9 @@ mod tests {
         let mut detail = JobDetail::new("j");
         detail.apply_output(page("other", "running", vec![chunk(1, "stdout", "x\n")]));
         assert!(detail.lines.is_empty() && detail.state.is_empty());
-        let data = (0..=MAX_LINES).map(|index| format!("line-{index}\n")).collect::<String>();
+        let data = (0..=MAX_LINES)
+            .map(|index| format!("line-{index}\n"))
+            .collect::<String>();
         detail.apply_output(page("j", "running", vec![chunk(1, "stdout", &data)]));
         assert_eq!(detail.lines.len(), MAX_LINES);
         assert_eq!(detail.lines.front().unwrap().1, "line-1");
@@ -272,15 +352,35 @@ mod tests {
 
     #[test]
     fn requests_and_cursors_advance_with_next_since() {
-        assert_eq!(output_request("build-42", 0), "/v1/jobs/build-42/output?stream=both&tail=500&since=0");
-        assert_eq!(output_request("a/b", 918), "/v1/jobs/a%2Fb/output?stream=both&since=918&maxBytes=262144");
-        assert_eq!(super::events_request("j", 5), "/v1/jobs/j/events?since=5&limit=200");
-        assert_eq!((advance_cursor(918, 921), advance_cursor(900, 10)), (921, 900));
+        assert_eq!(
+            output_request("build-42", 0),
+            "/v1/jobs/build-42/output?stream=both&tail=500&since=0"
+        );
+        assert_eq!(
+            output_request("a/b", 918),
+            "/v1/jobs/a%2Fb/output?stream=both&since=918&maxBytes=262144"
+        );
+        assert_eq!(
+            super::events_request("j", 5),
+            "/v1/jobs/j/events?since=5&limit=200"
+        );
+        assert_eq!(
+            (advance_cursor(918, 921), advance_cursor(900, 10)),
+            (921, 900)
+        );
     }
 
     #[test]
     fn terminal_states_stop_detail_polling() {
-        assert!(["exited", "failed", "killed", "lost"].iter().all(|state| is_terminal(state)));
-        assert!(["", "queued", "starting", "running", "exiting"].iter().all(|state| !is_terminal(state)));
+        assert!(
+            ["exited", "failed", "killed", "lost"]
+                .iter()
+                .all(|state| is_terminal(state))
+        );
+        assert!(
+            ["", "queued", "starting", "running", "exiting"]
+                .iter()
+                .all(|state| !is_terminal(state))
+        );
     }
 }

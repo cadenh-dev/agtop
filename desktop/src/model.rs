@@ -283,7 +283,8 @@ pub struct KillResult {
 }
 
 // Wire types from contracts section 12; not every informational field is displayed yet.
-#[allow(dead_code)] #[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputCounters {
     pub stdout: u64,
@@ -307,7 +308,8 @@ pub struct Truncation {
     pub stderr: Option<TruncationInfo>,
 }
 
-#[allow(dead_code)] #[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputChunk {
     pub seq: u64,
@@ -323,7 +325,8 @@ pub struct OutputChunk {
     pub first_dropped_seq: Option<u64>,
 }
 
-#[allow(dead_code)] #[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputPage {
     pub job_id: String,
@@ -344,7 +347,8 @@ pub struct OutputPage {
     pub chunks: Vec<OutputChunk>,
 }
 
-#[allow(dead_code)] #[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobEvent {
     pub seq: u64,
@@ -371,7 +375,8 @@ pub struct JobEvent {
     pub pid: Option<u32>,
 }
 
-#[allow(dead_code)] #[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventsPage {
     pub next_since: u64,
@@ -548,13 +553,38 @@ mod tests {
             r#" "futureField": { "ignored": true } }"#
         ))
         .unwrap();
-        assert_eq!((page.job_id.as_str(), page.state.as_str(), page.next_since, page.last_seq), ("build-42", "running", 918, 921));
-        assert_eq!((page.output_bytes.stdout, page.output_bytes.stderr), (10_485_790, 512));
+        assert_eq!(
+            (
+                page.job_id.as_str(),
+                page.state.as_str(),
+                page.next_since,
+                page.last_seq
+            ),
+            ("build-42", "running", 918, 921)
+        );
+        assert_eq!(
+            (page.output_bytes.stdout, page.output_bytes.stderr),
+            (10_485_790, 512)
+        );
         assert!(!page.has_more && page.source == "memory" && page.exit_code.is_none());
         let stdout = page.truncation.stdout.expect("stdout truncation");
-        assert_eq!((stdout.first_dropped_seq, stdout.last_dropped_seq, stdout.dropped_bytes), (4, 901, 9_437_214));
+        assert_eq!(
+            (
+                stdout.first_dropped_seq,
+                stdout.last_dropped_seq,
+                stdout.dropped_bytes
+            ),
+            (4, 901, 9_437_214)
+        );
         assert!(page.truncation.stderr.is_none());
-        assert_eq!((page.chunks[0].seq, page.chunks[0].byte_length, page.chunks[0].encoding.as_str()), (918, 79, "utf8"));
+        assert_eq!(
+            (
+                page.chunks[0].seq,
+                page.chunks[0].byte_length,
+                page.chunks[0].encoding.as_str()
+            ),
+            (918, 79, "utf8")
+        );
         assert!(!page.chunks[0].truncated && page.chunks[0].data.contains("[REDACTED:openai-key]"));
     }
 
@@ -577,15 +607,29 @@ mod tests {
             r#"{"seq":4,"timestamp":"t4","type":"policy","decision":"defer","rule":"gpu-busy","measured":91,"threshold":90,"detail":"gpu busy"}]}"#
         ))
         .unwrap();
-        assert_eq!((page.next_since, page.last_seq, page.events.len()), (4, 4, 4));
+        assert_eq!(
+            (page.next_since, page.last_seq, page.events.len()),
+            (4, 4, 4)
+        );
         assert!(!page.has_more);
         assert_eq!(
-            (page.events[0].kind.as_str(), page.events[0].state.as_deref(), page.events[0].reason.as_deref()),
+            (
+                page.events[0].kind.as_str(),
+                page.events[0].state.as_deref(),
+                page.events[0].reason.as_deref()
+            ),
             ("state", Some("queued"), Some("submitted"))
         );
-        assert_eq!((page.events[1].pid, page.events[2].exit_code), (Some(4242), Some(0)));
         assert_eq!(
-            (page.events[3].decision.as_deref(), page.events[3].rule.as_deref(), page.events[3].detail.as_deref()),
+            (page.events[1].pid, page.events[2].exit_code),
+            (Some(4242), Some(0))
+        );
+        assert_eq!(
+            (
+                page.events[3].decision.as_deref(),
+                page.events[3].rule.as_deref(),
+                page.events[3].detail.as_deref()
+            ),
             (Some("defer"), Some("gpu-busy"), Some("gpu busy"))
         );
         assert!(page.events[0].port.is_none());

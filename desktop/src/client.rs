@@ -104,14 +104,31 @@ impl Client {
         let status = response.status();
         if !status.is_success() {
             // Surface the daemon's error text. The token never appears in a response body.
-            let text = response.body_mut().with_config().limit(64 * 1024).read_to_string().unwrap_or_default();
+            let text = response
+                .body_mut()
+                .with_config()
+                .limit(64 * 1024)
+                .read_to_string()
+                .unwrap_or_default();
             let message = serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
-                .and_then(|body| body.get("error").and_then(|error| error.as_str()).map(str::to_owned))
+                .and_then(|body| {
+                    body.get("error")
+                        .and_then(|error| error.as_str())
+                        .map(str::to_owned)
+                })
                 .unwrap_or_else(|| format!("Daemon returned HTTP {}.", status.as_u16()));
-            return Err(HttpStatusError { status: status.as_u16(), message }.into());
+            return Err(HttpStatusError {
+                status: status.as_u16(),
+                message,
+            }
+            .into());
         }
-        Ok(response.body_mut().with_config().limit(32 * 1024 * 1024).read_json()?)
+        Ok(response
+            .body_mut()
+            .with_config()
+            .limit(32 * 1024 * 1024)
+            .read_json()?)
     }
     fn post<T: DeserializeOwned>(&self, path: &str, value: serde_json::Value) -> Result<T> {
         let mut response = self
@@ -140,7 +157,10 @@ impl Client {
 
 pub enum Command {
     Refresh,
-    Stop { id: String, start_time: String },
+    Stop {
+        id: String,
+        start_time: String,
+    },
     Launch(Launch),
     /// Some(id): start polling this job's output and events. None: stop.
     WatchJob(Option<String>),
@@ -280,7 +300,13 @@ fn poll_detail(
                 terminal |= is_terminal(&page.state);
                 let more = page.has_more;
                 output_cursor = advance_cursor(output_cursor, page.next_since);
-                if events.send(Event::JobOutput { id: id.to_owned(), page }).is_err() {
+                if events
+                    .send(Event::JobOutput {
+                        id: id.to_owned(),
+                        page,
+                    })
+                    .is_err()
+                {
                     return (output_cursor, event_cursor, false);
                 }
                 if !more {
@@ -299,7 +325,13 @@ fn poll_detail(
                 Ok(page) => {
                     let more = page.has_more;
                     event_cursor = advance_cursor(event_cursor, page.next_since);
-                    if events.send(Event::JobEvents { id: id.to_owned(), page }).is_err() {
+                    if events
+                        .send(Event::JobEvents {
+                            id: id.to_owned(),
+                            page,
+                        })
+                        .is_err()
+                    {
                         return (output_cursor, event_cursor, false);
                     }
                     if !more {
@@ -318,10 +350,15 @@ fn poll_detail(
 
 /// Reports a detail request failure. Returns whether the job stays watched.
 fn detail_failure(error: &anyhow::Error, id: &str, events: &Sender<Event>) -> bool {
-    let status = error.downcast_ref::<HttpStatusError>().map(|error| error.status);
+    let status = error
+        .downcast_ref::<HttpStatusError>()
+        .map(|error| error.status);
     if matches!(status, Some(404 | 409 | 410)) {
         let message = format!("{error:#}");
-        let _ = events.send(Event::JobDetailUnavailable { id: id.to_owned(), message });
+        let _ = events.send(Event::JobDetailUnavailable {
+            id: id.to_owned(),
+            message,
+        });
         false
     } else {
         let _ = events.send(Event::Error(format!("{error:#}")));

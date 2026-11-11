@@ -154,8 +154,12 @@ impl Workbench {
                     self.error = None;
                     self.busy = false;
                 }
-                Event::JobOutput { id, page } => self.with_detail(&id, |detail| detail.apply_output(page)),
-                Event::JobEvents { id, page } => self.with_detail(&id, |detail| detail.apply_events(page)),
+                Event::JobOutput { id, page } => {
+                    self.with_detail(&id, |detail| detail.apply_output(page))
+                }
+                Event::JobEvents { id, page } => {
+                    self.with_detail(&id, |detail| detail.apply_events(page))
+                }
                 Event::JobDetailUnavailable { id, message } => {
                     self.with_detail(&id, |detail| detail.unavailable = Some(message))
                 }
