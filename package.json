@@ -1,6 +1,6 @@
 {
   "name": "agtop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent-aware process discovery and OS containment for Windows, Linux, and macOS",
   "type": "module",
   "private": true,
@@ -23,6 +23,7 @@
     "test:mcp": "bun scripts/mcp-smoke.ts",
     "eval:skill": "bun scripts/skill-eval.ts",
     "bench:containment": "bun scripts/ab-containment.ts",
+    "bench:fleet": "bun scripts/bench-fleet.ts",
     "compile": "bun build src/cli.ts --compile --outfile dist/agtop",
     "desktop:build": "bun scripts/build-desktop.ts",
     "desktop": "bun src/cli.ts ui"

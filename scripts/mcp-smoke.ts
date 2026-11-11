@@ -38,13 +38,16 @@ const env = Object.fromEntries(
 Object.assign(env, { AGTOP_STATE_DIR: stateDir, AGTOP_PEER: "mcp-smoke" });
 
 const binary = process.env.AGTOP_MCP_BIN ? path.resolve(process.env.AGTOP_MCP_BIN) : undefined;
-const transport = new StdioClientTransport({
-  command: binary ?? process.execPath,
-  args: binary ? ["mcp"] : [path.join(root, "src/cli.ts"), "mcp"],
-  cwd: root,
-  env,
-  stderr: "inherit",
-});
+function newTransport(extraEnv: Record<string, string> = {}) {
+  return new StdioClientTransport({
+    command: binary ?? process.execPath,
+    args: binary ? ["mcp"] : [path.join(root, "src/cli.ts"), "mcp"],
+    cwd: root,
+    env: { ...env, ...extraEnv },
+    stderr: "inherit",
+  });
+}
+const transport = newTransport();
 const client = new Client({ name: "agtop-mcp-smoke", version: "1.0.0" }, { capabilities: {} });
 
 async function call(name: string, args: Record<string, unknown> = {}): Promise<any> {
@@ -67,7 +70,7 @@ try {
 
   await check("tools/list exposes the task-containment surface", async () => {
     const tools = (await client.listTools()).tools.map(tool => tool.name).sort();
-    assert.deepEqual(tools, ["accelerators", "cleanup", "harnesses", "kill", "lemonade", "list", "run", "status", "wait"]);
+    assert.deepEqual(tools, ["accelerators", "cleanup", "events", "harnesses", "kill", "lemonade", "list", "output", "run", "status", "wait"]);
   });
 
   await check("harness search returns the expanded catalog", async () => {
@@ -118,6 +121,56 @@ try {
   await check("kill rejects jobs from outside this session", async () => {
     const denied = await client.callTool({ name: "kill", arguments: { jobId: "not-owned" } });
     assert.equal(denied.isError, true);
+  });
+
+  await check("output returns captured stdout for an owned job", async () => {
+    const jobId = unique("smoke-output");
+    const line = unique("captured-line");
+    await call("run", {
+      command: process.execPath,
+      args: ["-e", `console.log(${JSON.stringify(line)})`],
+      harness: "custom",
+      jobId,
+      peer: "smoke",
+    });
+    const waited = await call("wait", { jobId, timeoutMs: 15000 });
+    assert.equal(waited.exitCode, 0);
+    const start = Date.now();
+    let page = await call("output", { jobId });
+    while (!(typeof page.text === "string" && page.text.includes(line)) && Date.now() - start < 5000) {
+      await delay(100);
+      page = await call("output", { jobId });
+    }
+    assert.equal(typeof page.text, "string");
+    assert.equal(page.text.includes(line), true);
+  });
+
+  await check("output is denied across MCP sessions", async () => {
+    const jobId = unique("smoke-foreign");
+    await call("run", {
+      command: process.execPath,
+      args: ["-e", "console.log('owner-only')"],
+      harness: "custom",
+      jobId,
+      peer: "smoke",
+    });
+    await call("wait", { jobId, timeoutMs: 15000 });
+    const foreign = new Client({ name: "agtop-mcp-smoke-foreign", version: "1.0.0" }, { capabilities: {} });
+    const foreignTransport = newTransport({
+      AGTOP_SESSION_ID: `smoke-foreign-${Date.now()}`,
+      AGTOP_OWNER_TOKEN: "f".repeat(64),
+    });
+    try {
+      await foreign.connect(foreignTransport);
+      const denied = await foreign.callTool({ name: "output", arguments: { jobId } });
+      const body = (denied.content as Array<{ type: string; text?: string }>)
+        .find(item => item.type === "text")?.text;
+      assert.equal(denied.isError, true);
+      assert.equal(body, "agtop: E_NOT_OWNER: only jobs created by this MCP session can be read.");
+    } finally {
+      try { await foreign.close(); } catch {}
+      try { await foreignTransport.close(); } catch {}
+    }
   });
 
   await check("cleanup stops every task job", async () => {

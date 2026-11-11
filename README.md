@@ -162,7 +162,7 @@ In Electron, use the library from the main process and expose a narrow applicati
 
 ## Fleet v0.2 (in progress)
 
-**Status: designed and de-risked, not yet implemented.** Nothing in this section is available in the current build. Today, background jobs started through MCP, the daemon, or the desktop discard their output, and there is no queue. The design is final and implementation is planned in five waves.
+**Status: available except federation.** Job records, output capture and replay, secret redaction, cooperative admission, the CLI (`agtop jobs/logs/events/queue/leases/submit`), the HTTP routes (`/v1/jobs`, `/v1/queue`, `/v1/policy`, `/v1/leases`), the MCP `output` and `events` tools and resources, and the desktop job-detail surfaces are available in the current build. Federation between daemons is still in progress.
 
 Fleet v0.2 turns agtop from a process monitor into a small job system for a workstation shared by several agents:
 
