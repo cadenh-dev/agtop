@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs";
+import fs from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fleetDir, type EventStore, type StoredOutput } from "./event-store.js";
@@ -7,7 +7,7 @@ import { FleetError } from "./fleet-errors.js";
 import { foldEvents, type IndexRebuildStats, type JobIndex } from "./job-index.js";
 import { isTerminal, RUNNING_STATES } from "./job-state.js";
 import { killAgentTree } from "./manager.js";
-import { isStaleJob, processSnapshot, readJobs, type ProcessIdentity } from "./registry.js";
+import { isStaleJob, processSnapshot, readJobs, stateDir, type ProcessIdentity } from "./registry.js";
 import { createPrivateFileExclusive, ensurePrivateDir } from "./secure-fs.js";
 import type { JobRecord, JobRecordV2, OutputCounters, StateEvent, SupervisorIdentity } from "./types.js";
 
@@ -128,24 +128,35 @@ function retentionHours(): number {
   if (raw === undefined || raw.trim() === "") return RETENTION_HOURS;
   const value = Number(raw); return Number.isFinite(value) && value >= 0 ? value : RETENTION_HOURS;
 }
-function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: number): string[] {
+function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: number, rename: typeof fs.renameSync = fs.renameSync): string[] {
   const list = [...records], protectedIds = new Set<string>(), pruned: string[] = [];
   for (const record of list) if (record.state === "queued") for (const dependency of record.queue.dependsOn) protectedIds.add(dependency);
-  const remove = (record: JobRecordV2): void => {
-    if (protectedIds.has(record.jobId)) return;
-    const companion = path.join(store.stateRoot, `${record.jobId}.json`);
-    let v1: JobRecord | undefined;
-    try { v1 = JSON.parse(fs.readFileSync(companion, "utf8")) as JobRecord; } catch { /* Missing or unreadable companions are left alone. */ }
+  const remove = (record: JobRecordV2): boolean => {
+    if (protectedIds.has(record.jobId)) return false;
+    const companion = path.join(stateDir(), `${record.jobId}.json`);
+    let v1: JobRecord | undefined, raw: Buffer | undefined;
+    try { raw = fs.readFileSync(companion); v1 = JSON.parse(raw.toString("utf8")) as JobRecord; } catch { /* Missing, unreadable, or unparsable companions are left alone. */ }
     if (v1?.version === 1 && v1.jobId === record.jobId && record.containment !== null &&
       v1.rootPid === record.containment.rootPid && v1.startTime === record.containment.startTime) {
-      try { fs.rmSync(companion, { force: true, maxRetries: 3, retryDelay: 100 }); }
+      const aside = `${companion}.retention.${process.pid}.${randomUUID()}`;
+      try {
+        rename(companion, aside);
+        const moved = fs.readFileSync(aside);
+        if (!moved.equals(raw!)) {
+          try { fs.linkSync(aside, companion); } catch { /* A newer record already occupies the path. */ }
+          fs.rmSync(aside, { force: true });
+        } else fs.rmSync(aside, { force: true, maxRetries: 3, retryDelay: 100 });
+      }
       catch (error) {
         process.stderr.write(`agtop: fleet retention could not remove v1 companion ${record.jobId}: ${message(error)}\n`);
-        return;
+        try { if (fs.existsSync(aside) && !fs.existsSync(companion)) fs.linkSync(aside, companion); } catch { /* Preserve whichever record remains reachable. */ }
+        try { fs.rmSync(aside, { force: true }); } catch { /* Best effort cleanup. */ }
+        return false;
       }
     }
     store.remove(record.jobId);
     pruned.push(record.jobId);
+    return true;
   };
   const hours = retentionHours(), remaining: JobRecordV2[] = [];
   for (const record of list) {
@@ -160,7 +171,7 @@ function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: 
     let excess = remaining.length - RETENTION_MAX_JOBS;
     for (const record of remaining) {
       if (excess <= 0) break;
-      if (!protectedIds.has(record.jobId)) { remove(record); excess -= 1; }
+      if (!protectedIds.has(record.jobId) && remove(record)) excess -= 1;
     }
   }
   return pruned;
@@ -182,7 +193,7 @@ function isThisProcess(supervisor: SupervisorIdentity): boolean {
  * nothing lost, logs one stderr line, and still applies retention.
  */
 export async function reconcileFleet(store: EventStore, index: JobIndex, options?: {
-  snapshot?: () => ProcessIdentity[]; kill?: typeof killAgentTree; now?: () => Date;
+  snapshot?: () => ProcessIdentity[]; kill?: typeof killAgentTree; now?: () => Date; retentionRename?: typeof fs.renameSync;
 }): Promise<ReconcileStats> {
   const startedAt = Date.now(), now = options?.now ?? (() => new Date());
   const stats: ReconcileStats = { ...index.rebuild(), lost: [], repaired: [], pruned: [], killedPids: [] };
@@ -193,7 +204,7 @@ export async function reconcileFleet(store: EventStore, index: JobIndex, options
     snapshot = (options?.snapshot ?? processSnapshot)(); rememberSelf(snapshot);
   } catch (error) {
     process.stderr.write(`agtop: fleet reconciliation skipped lost detection because the process snapshot failed: ${message(error)}\n`);
-    await withFleetLock(() => { stats.pruned.push(...pruneJobDirs(store, readRecords(store).values(), now().getTime())); });
+    await withFleetLock(() => { stats.pruned.push(...pruneJobDirs(store, readRecords(store).values(), now().getTime(), options?.retentionRename)); });
     stats.durationMs = Date.now() - startedAt; return stats;
   }
   await withFleetLock(async () => {
@@ -227,7 +238,7 @@ export async function reconcileFleet(store: EventStore, index: JobIndex, options
       index.apply(event); stats.lost.push(jobId); releaseJobLeases(jobId);
       record.state = "lost"; record.exitedAt = new Date(nowMs).toISOString(); // counts toward retention this pass
     }
-    stats.pruned.push(...pruneJobDirs(store, records, nowMs));
+    stats.pruned.push(...pruneJobDirs(store, records, nowMs, options?.retentionRename));
   });
   stats.durationMs = Date.now() - startedAt; return stats;
 }

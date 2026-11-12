@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import * as fs from "node:fs"; import * as os from "node:os"; import * as path from "node:path";
 import { EventStore, encodeFrame } from "../src/event-store.js";
-import { foldEvents, JobIndex, migrateV1Record, toSummary } from "../src/job-index.js";
+import { foldEvents, JobIndex, migrateV1Record, toSummary, isStaleV1Record } from "../src/job-index.js";
 import { readJobs, writeJob, type ProcessIdentity } from "../src/registry.js";
 import type { JobEvent, JobRecord, JobRecordPatch, JobRecordV2 } from "../src/types.js";
 
@@ -125,7 +125,7 @@ test("toSummary maps the summary fields and hides the command unless allowed", (
 
 test("rebuild lets a fleet record win over a v1 record with the same ID", () => {
   const writer = store.create(makeRecord("fleet-a")); writer.appendState("starting", "admitted"); writer.close();
-  const index = new JobIndex(store, { readV1: () => [v1Record("fleet-a"), v1Record("v1-only")], snapshot: () => liveV1Snapshot }), stats = index.rebuild();
+  const index = new JobIndex(store, { readV1: () => [v1Record("fleet-a"), v1Record("v1-only")] }), stats = index.rebuild();
   expect(stats.jobs).toBe(1); expect(stats.events).toBe(2); expect(stats.corruptTailBytes).toBe(0);
   expect(index.get("fleet-a")!.state).toBe("starting"); expect(index.get("fleet-a")!.command).toBe("echo");
   expect(index.get("v1-only")!.state).toBe("running"); expect(index.get("v1-only")!.command).toBe("");
@@ -155,7 +155,7 @@ test("runningCounts includes fleet and migrated v1 jobs", () => {
   const starting = store.create(makeRecord("start-claude", { peer: "p1", harness: "claude-code" })); starting.appendState("starting", "admitted"); starting.close();
   const exited = store.create(makeRecord("exit-custom", { peer: "p2", harness: "custom" })); exited.appendState("starting", "admitted"); exited.appendState("running", "spawned"); exited.appendState("exiting", "root-exited"); exited.appendState("exited", "root-exited"); exited.close();
   store.create(makeRecord("queued-custom", { peer: "p3", harness: "custom" })).close();
-  const index = new JobIndex(store, { readV1: () => [v1Record("v1-run", { peer: "p3" })], snapshot: () => liveV1Snapshot }); index.rebuild();
+  const index = new JobIndex(store, { readV1: () => [v1Record("v1-run", { peer: "p3" })] }); index.rebuild();
   const counts = index.runningCounts();
   expect(counts.total).toBe(3); expect(Object.fromEntries(counts.perPeer)).toEqual({ p1: 2, p3: 1 });
   expect(Object.fromEntries(counts.perHarness)).toEqual({ custom: 2, "claude-code": 1 });
@@ -203,7 +203,7 @@ test("uses the default state directory and keeps readJobs() to v1 records", () =
   try {
     writeJob(v1Record("v1-only"));
     const defaultStore = new EventStore(); defaultStore.create(makeRecord("fleet-job")).close();
-    const index = new JobIndex(defaultStore, { snapshot: () => liveV1Snapshot }); index.rebuild();
+    const index = new JobIndex(defaultStore, {}); index.rebuild();
     expect(index.list().map((record) => record.jobId).sort()).toEqual(["fleet-job", "v1-only"]);
     expect(index.get("v1-only")!.state).toBe("running"); expect(readJobs().map((record) => record.jobId)).toEqual(["v1-only"]);
   } finally {
@@ -212,23 +212,30 @@ test("uses the default state directory and keeps readJobs() to v1 records", () =
   }
 });
 
-test("migrated v1 jobs use cached staleness snapshots, while failures keep them visible", () => {
-  const live = v1Record("live-v1", { mode: "linux-env-pgid" }), stale = v1Record("stale-v1", { jobId: "stale-v1", rootPid: 9000, mode: "linux-env-pgid" });
-  let calls = 0;
-  const index = new JobIndex(store, { readV1: () => [live, stale], snapshot: () => { calls++; return liveV1Snapshot; } });
+test("JobIndex filters only v1 records older than an injected view and never scans", () => {
+  const live = v1Record("live-v1", { mode: "linux-env-pgid" });
+  const stale = v1Record("stale-v1", { jobId: "stale-v1", rootPid: 9000, mode: "linux-env-pgid" });
+  let viewCalls = 0;
+  const view = { takenAtMs: Date.parse("2026-01-03T00:00:00Z"), processes: liveV1Snapshot };
+  const index = new JobIndex(store, { readV1: () => [live, stale], staleness: () => view });
   index.rebuild();
   expect(index.list().map((job) => job.jobId)).toEqual(["live-v1"]);
   expect(index.runningCounts().total).toBe(1);
-  index.refresh(); index.runningCounts();
-  expect(calls).toBe(1);
+  const newRecord = v1Record("new-v1", { mode: "linux-env-pgid", createdAt: "2026-01-04T00:00:00.000Z" });
+  const afterView = new JobIndex(store, { readV1: () => [newRecord], staleness: () => { viewCalls++; return view; } });
+  afterView.rebuild();
+  expect(afterView.list().map((job) => job.jobId)).toEqual(["new-v1"]);
+  expect(afterView.runningCounts().total).toBe(1); expect(viewCalls).toBe(1);
+  const bare = new JobIndex(store, { readV1: () => [stale] }); bare.rebuild();
+  expect(bare.list().map((job) => job.jobId)).toEqual(["stale-v1"]);
+});
 
-  const failed = new JobIndex(store, { readV1: () => [stale], snapshot: () => { throw new Error("snapshot unavailable"); } });
-  failed.rebuild(); expect(failed.list().map((job) => job.jobId)).toEqual(["stale-v1"]);
-  expect(failed.runningCounts().total).toBe(1);
-
-  let emptyCalls = 0;
-  new JobIndex(store, { readV1: () => [], snapshot: () => { emptyCalls++; return []; } }).rebuild();
-  expect(emptyCalls).toBe(0);
+test("Windows v1 staleness keeps live roots and opened jobs", () => {
+  const record = v1Record("win-v1", { mode: "win32-job-object", jobName: "Global\\job", rootPid: 4242 });
+  const view = { takenAtMs: Date.parse("2026-01-03T00:00:00Z"), processes: [] as ProcessIdentity[] };
+  expect(isStaleV1Record(record, view, { platform: "win32", withJob: () => undefined })).toBe(true);
+  expect(isStaleV1Record(record, { ...view, processes: [{ pid: 4242, startTime: "100" }] }, { platform: "win32", withJob: () => undefined })).toBe(false);
+  expect(isStaleV1Record(record, view, { platform: "win32", withJob: () => [4242] })).toBe(false);
 });
 
 test("rebuilds 200 finished jobs in under one second", () => {

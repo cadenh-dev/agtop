@@ -3,7 +3,8 @@ import * as path from "node:path";
 import type { EventStore } from "./event-store.js";
 import { RUNNING_STATES } from "./job-state.js";
 import { readJobs } from "./registry.js";
-import { isStaleJob, processSnapshot, type ProcessIdentity } from "./registry.js";
+import { windowsApi } from "./windows.js";
+import { isStaleJob, type ProcessIdentity } from "./registry.js";
 import type { CaptureSpec, JobContainment, JobEvent, JobOwner, JobRecord, JobRecordV2, JobState, JobSummaryV2, QueueSpec, SupervisorIdentity } from "./types.js";
 
 /** Folds lifecycle events into a record. Returns undefined when seq 1 is missing or carries no record. */
@@ -59,6 +60,20 @@ export function toSummary(record: JobRecordV2, caller: { owned: boolean; showCom
 
 export interface JobFilter { states?: JobState[]; peer?: string; harness?: string; ownerSessionId?: string }
 export interface IndexRebuildStats { jobs: number; events: number; corruptTailBytes: number; durationMs: number }
+export interface StalenessView { takenAtMs: number; processes: ProcessIdentity[] }
+export function isStaleV1Record(record: JobRecord, view: StalenessView, options?: { platform?: NodeJS.Platform; withJob?: (name: string) => number[] | undefined }): boolean {
+  const platform = options?.platform ?? process.platform;
+  if (record.mode === "win32-job-object" && platform === "win32") {
+    const root = view.processes.find((item) => item.pid === record.rootPid);
+    if (root?.startTime === record.startTime || !record.jobName) return false;
+    try {
+      const pids = options?.withJob ? options.withJob(record.jobName) : windowsApi().withJob(record.jobName, 4, (h) => windowsApi().pids(h));
+      return pids === undefined || isStaleJob(record, view.processes, pids, platform);
+    } catch { return false; }
+  }
+  if (isStaleJob(record, view.processes, undefined, platform)) return true;
+  return false;
+}
 
 function eventsFile(store: EventStore, jobId: string): string {
   return path.join(store.stateRoot, "fleet", "jobs", jobId, "events.jsonl");
@@ -76,14 +91,13 @@ function logSize(file: string): number {
 export class JobIndex {
   private readonly store: EventStore;
   private readonly readV1: () => JobRecord[];
-  private readonly takeSnapshot: () => ProcessIdentity[];
-  private snapshotCache?: { at: number; value?: ProcessIdentity[] };
+  private readonly staleness?: () => StalenessView | undefined;
   private readonly sizes = new Map<string, number>();
   private readonly fleet = new Map<string, JobRecordV2>();
   private readonly v1 = new Map<string, JobRecordV2>();
 
-  constructor(store: EventStore, options?: { readV1?: () => JobRecord[]; snapshot?: () => ProcessIdentity[] }) {
-    this.store = store; this.readV1 = options?.readV1 ?? readJobs; this.takeSnapshot = options?.snapshot ?? processSnapshot;
+  constructor(store: EventStore, options?: { readV1?: () => JobRecord[]; staleness?: () => StalenessView | undefined }) {
+    this.store = store; this.readV1 = options?.readV1 ?? readJobs; this.staleness = options?.staleness;
   }
 
   rebuild(): IndexRebuildStats {
@@ -176,16 +190,11 @@ export class JobIndex {
   private reloadV1(): void {
     this.v1.clear();
     const records = this.readV1().filter((record) => !this.fleet.has(record.jobId));
-    if (records.length === 0) return;
-    let snapshot = this.snapshotCache;
-    if (snapshot === undefined || performance.now() - snapshot.at >= 5000) {
-      try { snapshot = { at: performance.now(), value: this.takeSnapshot() }; }
-      catch { snapshot = { at: performance.now() }; }
-      this.snapshotCache = snapshot;
-    }
+    const view = records.length ? this.staleness?.() : undefined;
     for (const record of records) {
-      if (snapshot.value !== undefined && isStaleJob(record, snapshot.value)) continue;
+      if (view !== undefined && Number.isFinite(Date.parse(record.createdAt)) && Date.parse(record.createdAt) < view.takenAtMs && isStaleV1Record(record, view)) continue;
       this.v1.set(record.jobId, migrateV1Record(record));
     }
   }
+  hasUnshadowedV1Records(): boolean { return this.readV1().some((record) => !this.fleet.has(record.jobId)); }
 }

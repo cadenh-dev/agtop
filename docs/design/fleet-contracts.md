@@ -543,9 +543,10 @@ export function migrateV1Record(v1: JobRecord): JobRecordV2;
 export function toSummary(record: JobRecordV2, caller: { owned: boolean; showCommand: boolean }): JobSummaryV2;
 export interface JobFilter { states?: JobState[]; peer?: string; harness?: string; ownerSessionId?: string }
 export interface IndexRebuildStats { jobs: number; events: number; corruptTailBytes: number; durationMs: number }
+export interface StalenessView { takenAtMs: number; processes: ProcessIdentity[] }
 
 export class JobIndex {
-  constructor(store: EventStore, options?: { readV1?: () => JobRecord[] });
+  constructor(store: EventStore, options?: { readV1?: () => JobRecord[]; staleness?: () => StalenessView | undefined });
   rebuild(): IndexRebuildStats;
   /** Re-reads events.jsonl of jobs whose file size changed, discovers new job directories, drops removed ones. */
   refresh(): void;
@@ -560,7 +561,7 @@ export class JobIndex {
 
 Folding: start from `events[0].record`; for each later `StateEvent` set `state`, `stateReason = reason`, and shallow-assign `patch`; set `lastSeq` to the highest seq seen in `events.jsonl` unless a patch supplied a higher one. `spawn`, `exit`, `lease` and `policy` events do not change the record (their data reaches the record through the patch on the neighboring state event).
 
-`RUNNING_STATES` and `TERMINAL_STATES` come from `src/job-state.ts` (section 14). `readV1` defaults to `readJobs` from `src/registry.ts`. v1 jobs whose ID has no fleet directory appear via `migrateV1Record`. `JobIndex` never scans the OS process table.
+`RUNNING_STATES` and `TERMINAL_STATES` come from `src/job-state.ts` (section 14). `readV1` defaults to `readJobs` from `src/registry.ts`. v1 jobs whose ID has no fleet directory appear via `migrateV1Record`. By default every such record is shown. When `staleness` supplies a last-known view, the index filters a record only when its `createdAt` predates `takenAtMs` and the record is proven stale from that view. Unknown views keep records visible. `JobIndex` never scans the OS process table; the injected callback only reads FleetService's cached view.
 
 ## 6. Capture modules
 
@@ -1015,6 +1016,8 @@ export class FleetService {
   close(): Promise<void>;       // scheduler.stop(), runtime.shutdown()
 }
 ```
+
+FleetService owns an unref'd 15-second process staleness refresher. It scans asynchronously, only while unshadowed v1 records exist, never from inside the fleet lock, and permits only one scan in flight. A failed scan keeps the prior view; a fresh view refreshes the index and ticks the scheduler. `close()` stops the refresher.
 
 Access rules (`ownership.ts`):
 

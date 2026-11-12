@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { windowsApi } from "./windows.js";
 import { darwinIdentities, darwinScannerMode } from "./darwin.js";
 import type { JobRecord } from "./types.js";
@@ -28,13 +29,19 @@ export function reserveJob(id: string, staleCheck = isStaleJob): () => void {
 }
 
 export interface ProcessIdentity { pid: number; startTime: string; pgid?: number; tag?: string }
+const powershellProcesses = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,@{n='Start';e={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds().ToString()}}) | ConvertTo-Json -Compress";
+function parseWindowsSnapshot(raw: string): ProcessIdentity[] {
+  const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) || [];
+  return (Array.isArray(parsed) ? parsed : [parsed]).map(p => ({ pid: Number(p.ProcessId), startTime: String(p.Start) }));
+}
 export function processSnapshot(platform: NodeJS.Platform = process.platform): ProcessIdentity[] {
   if (platform === "win32") {
-    const script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,@{n='Start';e={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds().ToString()}}) | ConvertTo-Json -Compress";
-    const raw = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 20000 });
-    const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) || [];
-    return (Array.isArray(parsed) ? parsed : [parsed]).map(p => ({ pid: Number(p.ProcessId), startTime: String(p.Start) }));
+    const raw = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", powershellProcesses], { encoding: "utf8", windowsHide: true, timeout: 20000 });
+    return parseWindowsSnapshot(raw);
   }
+  return processSnapshotFast(platform);
+}
+function processSnapshotFast(platform: NodeJS.Platform): ProcessIdentity[] {
   if (platform === "darwin") {
     if (darwinScannerMode() === "ps") throw new Error("Stale-job checks require the native macOS process snapshot.");
     return darwinIdentities();
@@ -49,6 +56,11 @@ export function processSnapshot(platform: NodeJS.Platform = process.platform): P
       return [{ pid, startTime, pgid, tag: env?.slice("AGTOP_JOB_ID=".length) }];
     } catch { return []; }
   });
+}
+export async function processSnapshotAsync(platform: NodeJS.Platform = process.platform): Promise<ProcessIdentity[]> {
+  if (platform !== "win32") return processSnapshotFast(platform);
+  const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", powershellProcesses], { encoding: "utf8", windowsHide: true, timeout: 20000 }) as { stdout: string };
+  return parseWindowsSnapshot(stdout);
 }
 function cgroupPids(dir: string): number[] {
   const pids = fs.readFileSync(path.join(dir, "cgroup.procs"), "utf8").trim().split(/\s+/).filter(Boolean).map(Number);
