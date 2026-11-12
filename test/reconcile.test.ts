@@ -159,6 +159,28 @@ test("retention prunes by age, is disabled by env 0, and keeps dependencies of q
   expect(lastStateEvent("waiter").state).toBe("queued");
 });
 
+test("pruning a lost fleet job removes its v1 shadow and running ghost", async () => {
+  const store = new EventStore(), index = new JobIndex(store);
+  const exitedAt = ago(2), writer = store.create(recordFor("ghost"));
+  writer.appendState("lost", "supervisor-lost", { exitedAt, exitCode: null }); writer.close();
+  writeJob({ version: 1, jobId: "ghost", rootPid: 700, startTime: "70", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "passive-ppid", createdAt: ago(3) });
+  process.env.AGTOP_FLEET_RETENTION_HOURS = "0.0005";
+  index.rebuild(); expect(index.runningCounts().total).toBe(0); // fleet record shadows v1 before prune
+  expect((await reconcileFleet(store, index, { snapshot: () => [], kill: noKill })).pruned).toEqual(["ghost"]);
+  expect(fs.existsSync(path.join(root, "ghost.json"))).toBe(false);
+  index.refresh(); expect(index.list().some((job) => job.jobId === "ghost")).toBe(false);
+  expect(index.runningCounts().total).toBe(0);
+});
+
+test("retention preserves pure v1 records without a fleet directory", async () => {
+  const store = new EventStore(), index = new JobIndex(store);
+  writeJob({ version: 1, jobId: "legacy", rootPid: 700, startTime: "70", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "passive-ppid", createdAt: ago(73) });
+  createTerminal("old-fleet", ago(73));
+  expect((await reconcileFleet(store, index, { snapshot: () => [], kill: noKill })).pruned).toEqual(["old-fleet"]);
+  expect(fs.existsSync(path.join(root, "legacy.json"))).toBe(true);
+  index.refresh(); expect(index.list().some((job) => job.jobId === "legacy")).toBe(true);
+});
+
 test("retention keeps at most RETENTION_MAX_JOBS terminal jobs and removes the oldest", async () => {
   const store = new EventStore(), index = new JobIndex(store, { readV1: () => [] }); const base = Date.now() - 3_600_000, total = RETENTION_MAX_JOBS + 2;
   for (let index0 = 0; index0 < total; index0++) writeTerminalLog(`bulk-${String(index0).padStart(3, "0")}`, new Date(base + index0 * 1000).toISOString());

@@ -7,7 +7,7 @@ import { FleetError } from "./fleet-errors.js";
 import { foldEvents, type IndexRebuildStats, type JobIndex } from "./job-index.js";
 import { isTerminal, RUNNING_STATES } from "./job-state.js";
 import { killAgentTree } from "./manager.js";
-import { isStaleJob, processSnapshot, readJobs, type ProcessIdentity } from "./registry.js";
+import { isStaleJob, processSnapshot, readJobs, stateDir, type ProcessIdentity } from "./registry.js";
 import { createPrivateFileExclusive, ensurePrivateDir } from "./secure-fs.js";
 import type { JobRecord, JobRecordV2, OutputCounters, StateEvent, SupervisorIdentity } from "./types.js";
 
@@ -131,7 +131,13 @@ function retentionHours(): number {
 function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: number): string[] {
   const list = [...records], protectedIds = new Set<string>(), pruned: string[] = [];
   for (const record of list) if (record.state === "queued") for (const dependency of record.queue.dependsOn) protectedIds.add(dependency);
-  const remove = (record: JobRecordV2): void => { if (!protectedIds.has(record.jobId)) { store.remove(record.jobId); pruned.push(record.jobId); } };
+  const remove = (record: JobRecordV2): void => {
+    if (protectedIds.has(record.jobId)) return;
+    store.remove(record.jobId);
+    try { fs.rmSync(path.join(stateDir(), `${record.jobId}.json`)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") { /* Best effort companion cleanup. */ } }
+    pruned.push(record.jobId);
+  };
   const hours = retentionHours(), remaining: JobRecordV2[] = [];
   for (const record of list) {
     if (!isTerminal(record.state)) continue;
