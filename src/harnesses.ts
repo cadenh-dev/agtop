@@ -14,7 +14,7 @@ export interface HarnessRule {
   modules?: readonly string[];
   /** The first non-flag argument must be one of these before a binary match is accepted. */
   requiresSubcommand?: readonly string[];
-  /** A binary match is rejected when the executable or script path contains one of these. */
+  /** A binary match is rejected when argv[0], name, wrapper entry paths, or cwd contains one of these. */
   excludePaths?: readonly string[];
 }
 
@@ -99,7 +99,7 @@ export const HARNESS_DEFINITIONS: readonly HarnessDefinition[] = [
     label: "Sourcegraph Amp",
     kind: "agent",
     rules: [
-      { binaries: ["amp"], excludePaths: ["cubecoders", "ampdatastore", "/amp/"] },
+      { binaries: ["amp"], excludePaths: ["cubecoders", "ampdatastore"] },
       { paths: ["@ampcode/cli", "@sourcegraph/amp"] },
     ],
   },
@@ -535,7 +535,10 @@ export function detectHarness(
       if (rule.modules && module && rule.modules.some(name => module === name || module.startsWith(`${name}.`))) return definition.id;
       const binary = rule.binaries?.some(name => names.has(name))
         || rule.binaryPrefixes?.some(prefix => [...names].some(name => name.startsWith(prefix)));
-      if (binary && (!rule.requiresSubcommand || (subcommand !== undefined && rule.requiresSubcommand.includes(subcommand)))) return definition.id;
+      const bareWindowsAmpExe = definition.id === "amp"
+        && [p.name, argv[0] || ""].some(value => normalize(value).endsWith("amp.exe") && !normalize(value).includes("/"))
+        && ![p.name, argv[0] || "", p.cwd || ""].some(value => normalize(value).includes("/"));
+      if (binary && !bareWindowsAmpExe && (!rule.requiresSubcommand || (subcommand !== undefined && rule.requiresSubcommand.includes(subcommand)))) return definition.id;
     }
   }
   return undefined;

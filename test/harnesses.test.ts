@@ -11,6 +11,7 @@ import {
   type HarnessRule,
 } from "../src/harnesses.js";
 import type { HarnessType } from "../src/types.js";
+import { windowsProcessCommandLine } from "../src/discovery.js";
 
 type DetectInput = Parameters<typeof detectHarness>[0];
 
@@ -227,6 +228,22 @@ describe("negative and ambiguous cases", () => {
         argv: ["node", `/usr/lib/node_modules/${packagePath}/bin/amp.js`],
       })).toBe("amp");
     }
+  });
+
+  test("Amp rejects name-only Windows AMP and datastore paths while keeping native CLI matches", () => {
+    reject({ name: "AMP.exe", cmdline: "AMP.exe" });
+    reject({ name: "AMP.exe", cmdline: '"AMP.exe" +Instance1' });
+    reject({ name: "AMP.exe", cmdline: '"C:\\Program Files\\CubeCoders Limited\\AMP\\AMP.exe"' });
+    reject({ name: "AMP.exe", cmdline: "C:\\AMPDatastore\\Instances\\Minecraft01\\AMP.exe" });
+    expect(detectHarness({ name: "amp", cmdline: "/opt/amp/bin/amp --help", argv: ["/opt/amp/bin/amp", "--help"] })).toBe("amp");
+    expect(detectHarness({ name: "amp", cmdline: "amp", argv: ["amp"], cwd: "/home/u/src/amp/packages/cli" })).toBe("amp");
+    expect(detectHarness({ name: "amp", cmdline: "/home/amp/.local/bin/amp", argv: ["/home/amp/.local/bin/amp"], cwd: "/home/amp/work" })).toBe("amp");
+  });
+
+  test("Windows executable fallback quotes paths with spaces for argv parsing", () => {
+    expect(windowsProcessCommandLine(null, "C:\\Program Files\\CubeCoders Limited\\AMP\\AMP.exe", "AMP.exe"))
+      .toBe('"C:\\Program Files\\CubeCoders Limited\\AMP\\AMP.exe"');
+    expect(windowsProcessCommandLine(null, "C:\\Tools\\amp.exe", "amp.exe")).toBe("C:\\Tools\\amp.exe");
   });
 
   test("empty or odd argv", () => {
