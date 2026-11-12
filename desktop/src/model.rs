@@ -392,6 +392,8 @@ pub struct EventsPage {
 pub struct JobsPage {
     #[serde(default)]
     pub jobs: Vec<JobSummary>,
+    #[serde(default)]
+    pub next_after: Option<String>,
 }
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
