@@ -310,7 +310,8 @@ const MAX_PAGES_PER_TICK: usize = 20;
 const MAX_JOB_LIST_PAGES: usize = 10;
 
 fn fetch_jobs(client: &Client) -> Result<Vec<JobSummary>> {
-    let mut jobs = Vec::new();
+    let mut jobs: Vec<JobSummary> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut after: Option<String> = None;
     for _ in 0..MAX_JOB_LIST_PAGES {
         let path = after.as_ref().map_or_else(
@@ -318,7 +319,13 @@ fn fetch_jobs(client: &Client) -> Result<Vec<JobSummary>> {
             |cursor| format!("/v1/jobs?limit=500&after={}", encode_segment(cursor)),
         );
         let page: JobsPage = client.get(&path)?;
-        jobs.extend(page.jobs);
+        // The daemon restarts from the first page when the cursor job vanished
+        // between requests, so a later page can repeat earlier jobs.
+        jobs.extend(
+            page.jobs
+                .into_iter()
+                .filter(|job| seen.insert(job.job_id.clone())),
+        );
         let Some(next) = page.next_after.filter(|next| !next.is_empty()) else {
             break;
         };
@@ -336,17 +343,23 @@ fn poll_detail(
     captured: bool,
     events: &Sender<Event>,
 ) -> (u64, u64, bool) {
+    // The daemon answers both output and events with E_CAPTURE_DISABLED for a
+    // job started without capture; its state arrives with the job list instead.
+    if !captured {
+        return (output_cursor, event_cursor, false);
+    }
     let mut keep = true;
     let mut terminal = terminal_job;
     let mut output_more = false;
     let mut events_more = false;
-    for _ in 0..if captured { MAX_PAGES_PER_TICK } else { 0 } {
+    for _ in 0..MAX_PAGES_PER_TICK {
         match client.get::<OutputPage>(&output_request(id, output_cursor)) {
             Ok(page) => {
                 terminal |= is_terminal(&page.state);
-                let more = page.has_more;
+                let next = advance_cursor(output_cursor, page.next_since);
+                let more = made_progress(page.has_more, output_cursor, next);
                 output_more = more;
-                output_cursor = advance_cursor(output_cursor, page.next_since);
+                output_cursor = next;
                 if events
                     .send(Event::JobOutput {
                         id: id.to_owned(),
@@ -370,9 +383,10 @@ fn poll_detail(
         for _ in 0..MAX_PAGES_PER_TICK {
             match client.get::<EventsPage>(&events_request(id, event_cursor)) {
                 Ok(page) => {
-                    let more = page.has_more;
+                    let next = advance_cursor(event_cursor, page.next_since);
+                    let more = made_progress(page.has_more, event_cursor, next);
                     events_more = more;
-                    event_cursor = advance_cursor(event_cursor, page.next_since);
+                    event_cursor = next;
                     if events
                         .send(Event::JobEvents {
                             id: id.to_owned(),
@@ -398,6 +412,12 @@ fn poll_detail(
         event_cursor,
         keep && should_keep_detail_watch(terminal, output_more, events_more),
     )
+}
+
+/// A page that reports more data but does not move the cursor would make the
+/// watch refetch the same page forever; treat it as drained.
+fn made_progress(has_more: bool, cursor: u64, next: u64) -> bool {
+    has_more && next > cursor
 }
 
 fn should_keep_detail_watch(terminal: bool, output_more: bool, events_more: bool) -> bool {
@@ -427,7 +447,7 @@ fn detail_failure(error: &anyhow::Error, id: &str, events: &Sender<Event>) -> bo
 
 #[cfg(test)]
 mod detail_decision_tests {
-    use super::{HttpStatusError, detail_failure, should_keep_detail_watch};
+    use super::{HttpStatusError, detail_failure, made_progress, should_keep_detail_watch};
     use std::sync::mpsc;
 
     #[test]
@@ -436,6 +456,19 @@ mod detail_decision_tests {
         assert!(should_keep_detail_watch(true, false, true));
         assert!(!should_keep_detail_watch(true, false, false));
         assert!(should_keep_detail_watch(false, false, false));
+    }
+
+    #[test]
+    fn a_page_that_claims_more_without_advancing_counts_as_drained() {
+        assert!(made_progress(true, 10, 20));
+        assert!(!made_progress(true, 10, 10));
+        assert!(!made_progress(false, 10, 20));
+        // A terminal job whose stalled page never advances stops being watched.
+        assert!(!should_keep_detail_watch(
+            true,
+            made_progress(true, 7, 7),
+            false
+        ));
     }
 
     #[test]
