@@ -246,6 +246,15 @@ describe("negative and ambiguous cases", () => {
     expect(windowsProcessCommandLine(null, "C:\\Tools\\amp.exe", "amp.exe")).toBe("C:\\Tools\\amp.exe");
   });
 
+  test("Windows fallback command lines round-trip through Amp detection", () => {
+    const panel = windowsProcessCommandLine(null, "C:\\Program Files\\CubeCoders Limited\\AMP\\AMP.exe", "AMP.exe");
+    expect(detectHarness({ name: "AMP.exe", cmdline: panel })).toBeUndefined();
+    // A bare panel name stays rejected even if a working directory is ever reported.
+    expect(detectHarness({ name: "AMP.exe", cmdline: "AMP.exe", cwd: "C:\\Games\\Server" })).toBeUndefined();
+    // Path evidence keeps a Windows amp.exe outside the CubeCoders locations detectable.
+    expect(detectHarness({ name: "amp.exe", cmdline: "C:\\Tools\\amp.exe --x" })).toBe("amp");
+  });
+
   test("empty or odd argv", () => {
     reject({ name: "", cmdline: "" });
     reject({ name: "node", cmdline: "node" });

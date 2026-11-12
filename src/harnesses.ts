@@ -537,7 +537,7 @@ export function detectHarness(
         || rule.binaryPrefixes?.some(prefix => [...names].some(name => name.startsWith(prefix)));
       const bareWindowsAmpExe = definition.id === "amp"
         && [p.name, argv[0] || ""].some(value => normalize(value).endsWith("amp.exe") && !normalize(value).includes("/"))
-        && ![p.name, argv[0] || "", p.cwd || ""].some(value => normalize(value).includes("/"));
+        && ![p.name, argv[0] || ""].some(value => normalize(value).includes("/"));
       if (binary && !bareWindowsAmpExe && (!rule.requiresSubcommand || (subcommand !== undefined && rule.requiresSubcommand.includes(subcommand)))) return definition.id;
     }
   }
