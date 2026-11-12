@@ -7,7 +7,7 @@ import { FleetError } from "./fleet-errors.js";
 import { foldEvents, type IndexRebuildStats, type JobIndex } from "./job-index.js";
 import { isTerminal, RUNNING_STATES } from "./job-state.js";
 import { killAgentTree } from "./manager.js";
-import { isStaleJob, processSnapshot, readJobs, stateDir, type ProcessIdentity } from "./registry.js";
+import { isStaleJob, processSnapshot, readJobs, type ProcessIdentity } from "./registry.js";
 import { createPrivateFileExclusive, ensurePrivateDir } from "./secure-fs.js";
 import type { JobRecord, JobRecordV2, OutputCounters, StateEvent, SupervisorIdentity } from "./types.js";
 
@@ -133,9 +133,18 @@ function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: 
   for (const record of list) if (record.state === "queued") for (const dependency of record.queue.dependsOn) protectedIds.add(dependency);
   const remove = (record: JobRecordV2): void => {
     if (protectedIds.has(record.jobId)) return;
+    const companion = path.join(store.stateRoot, `${record.jobId}.json`);
+    let v1: JobRecord | undefined;
+    try { v1 = JSON.parse(fs.readFileSync(companion, "utf8")) as JobRecord; } catch { /* Missing or unreadable companions are left alone. */ }
+    if (v1?.version === 1 && v1.jobId === record.jobId && record.containment !== null &&
+      v1.rootPid === record.containment.rootPid && v1.startTime === record.containment.startTime) {
+      try { fs.rmSync(companion, { force: true, maxRetries: 3, retryDelay: 100 }); }
+      catch (error) {
+        process.stderr.write(`agtop: fleet retention could not remove v1 companion ${record.jobId}: ${message(error)}\n`);
+        return;
+      }
+    }
     store.remove(record.jobId);
-    try { fs.rmSync(path.join(stateDir(), `${record.jobId}.json`)); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") { /* Best effort companion cleanup. */ } }
     pruned.push(record.jobId);
   };
   const hours = retentionHours(), remaining: JobRecordV2[] = [];

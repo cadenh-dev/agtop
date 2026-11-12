@@ -162,23 +162,44 @@ test("retention prunes by age, is disabled by env 0, and keeps dependencies of q
 test("pruning a lost fleet job removes its v1 shadow and running ghost", async () => {
   const store = new EventStore(), index = new JobIndex(store);
   const exitedAt = ago(2), writer = store.create(recordFor("ghost"));
-  writer.appendState("lost", "supervisor-lost", { exitedAt, exitCode: null }); writer.close();
-  writeJob({ version: 1, jobId: "ghost", rootPid: 700, startTime: "70", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "passive-ppid", createdAt: ago(3) });
+  writer.appendState("lost", "supervisor-lost", { exitedAt, exitCode: null, containment: { mode: "passive-ppid", rootPid: 900, startTime: "9" } }); writer.close();
+  writeJob({ version: 1, jobId: "ghost", rootPid: 900, startTime: "9", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "passive-ppid", createdAt: ago(3) });
   process.env.AGTOP_FLEET_RETENTION_HOURS = "0.0005";
   index.rebuild(); expect(index.runningCounts().total).toBe(0); // fleet record shadows v1 before prune
+  const remove = store.remove.bind(store); let companionWasGone = false;
+  store.remove = ((jobId: string) => { companionWasGone = !fs.existsSync(path.join(root, `${jobId}.json`)); remove(jobId); }) as typeof store.remove;
   expect((await reconcileFleet(store, index, { snapshot: () => [], kill: noKill })).pruned).toEqual(["ghost"]);
+  expect(companionWasGone).toBe(true);
   expect(fs.existsSync(path.join(root, "ghost.json"))).toBe(false);
   index.refresh(); expect(index.list().some((job) => job.jobId === "ghost")).toBe(false);
   expect(index.runningCounts().total).toBe(0);
 });
 
-test("retention preserves pure v1 records without a fleet directory", async () => {
-  const store = new EventStore(), index = new JobIndex(store);
-  writeJob({ version: 1, jobId: "legacy", rootPid: 700, startTime: "70", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "passive-ppid", createdAt: ago(73) });
-  createTerminal("old-fleet", ago(73));
-  expect((await reconcileFleet(store, index, { snapshot: () => [], kill: noKill })).pruned).toEqual(["old-fleet"]);
-  expect(fs.existsSync(path.join(root, "legacy.json"))).toBe(true);
-  index.refresh(); expect(index.list().some((job) => job.jobId === "legacy")).toBe(true);
+test("retention preserves a live v1 record when its ID collides with an expired fleet job", async () => {
+  const store = new EventStore(), index = new JobIndex(store, { snapshot: () => liveSnapshot });
+  const writer = store.create(recordFor("collision"));
+  writer.appendState("starting", "admitted");
+  writer.appendState("running", "spawned", { containment: { mode: "passive-ppid", rootPid: 900, startTime: "9" } });
+  writer.appendState("exiting", "root-exited"); writer.appendState("lost", "supervisor-lost", { exitedAt: ago(73) }); writer.close();
+  writeJob({ version: 1, jobId: "collision", rootPid: LIVE.pid, startTime: LIVE.startTime, harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "passive-ppid", createdAt: ago(73) });
+  expect((await reconcileFleet(store, index, { snapshot: () => [], kill: noKill })).pruned).toEqual(["collision"]);
+  expect(fs.existsSync(path.join(root, "collision.json"))).toBe(true);
+  expect(fs.existsSync(jobDir("collision"))).toBe(false);
+});
+
+test("retention uses the EventStore root for its v1 companion", async () => {
+  const customRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agtop-custom-store-")), store = new EventStore({ root: customRoot });
+  const writer = store.create(recordFor("custom-root"));
+  writer.appendState("starting", "admitted"); writer.appendState("running", "spawned", { containment: { mode: "passive-ppid", rootPid: 900, startTime: "9" } });
+  writer.appendState("exiting", "root-exited"); writer.appendState("lost", "supervisor-lost", { exitedAt: ago(73) }); writer.close();
+  const v1 = { version: 1, jobId: "custom-root", rootPid: 900, startTime: "9", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "passive-ppid", createdAt: ago(73) };
+  fs.writeFileSync(path.join(customRoot, "custom-root.json"), JSON.stringify(v1));
+  fs.writeFileSync(path.join(root, "custom-root.json"), "must remain untouched");
+  try {
+    expect((await reconcileFleet(store, new JobIndex(store, { readV1: () => [] }), { snapshot: () => [], kill: noKill })).pruned).toEqual(["custom-root"]);
+    expect(fs.existsSync(path.join(customRoot, "custom-root.json"))).toBe(false);
+    expect(fs.readFileSync(path.join(root, "custom-root.json"), "utf8")).toBe("must remain untouched");
+  } finally { fs.rmSync(customRoot, { recursive: true, force: true }); }
 });
 
 test("retention keeps at most RETENTION_MAX_JOBS terminal jobs and removes the oldest", async () => {

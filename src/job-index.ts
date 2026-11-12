@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { jobDir, type EventStore } from "./event-store.js";
+import type { EventStore } from "./event-store.js";
 import { RUNNING_STATES } from "./job-state.js";
 import { readJobs } from "./registry.js";
+import { isStaleJob, processSnapshot, type ProcessIdentity } from "./registry.js";
 import type { CaptureSpec, JobContainment, JobEvent, JobOwner, JobRecord, JobRecordV2, JobState, JobSummaryV2, QueueSpec, SupervisorIdentity } from "./types.js";
 
 /** Folds lifecycle events into a record. Returns undefined when seq 1 is missing or carries no record. */
@@ -59,11 +60,8 @@ export function toSummary(record: JobRecordV2, caller: { owned: boolean; showCom
 export interface JobFilter { states?: JobState[]; peer?: string; harness?: string; ownerSessionId?: string }
 export interface IndexRebuildStats { jobs: number; events: number; corruptTailBytes: number; durationMs: number }
 
-/** EventStore keeps its custom root private; a store built with { root } logs under <root>/fleet/jobs (lead decision D3). */
-interface StoreWithRoot { root?: string }
 function eventsFile(store: EventStore, jobId: string): string {
-  const root = (store as unknown as StoreWithRoot).root;
-  return root === undefined ? path.join(jobDir(jobId), "events.jsonl") : path.join(root, "fleet", "jobs", jobId, "events.jsonl");
+  return path.join(store.stateRoot, "fleet", "jobs", jobId, "events.jsonl");
 }
 /** File size, or -1 when the log does not exist yet. */
 function logSize(file: string): number {
@@ -78,12 +76,14 @@ function logSize(file: string): number {
 export class JobIndex {
   private readonly store: EventStore;
   private readonly readV1: () => JobRecord[];
+  private readonly takeSnapshot: () => ProcessIdentity[];
+  private snapshotCache?: { at: number; value?: ProcessIdentity[] };
   private readonly sizes = new Map<string, number>();
   private readonly fleet = new Map<string, JobRecordV2>();
   private readonly v1 = new Map<string, JobRecordV2>();
 
-  constructor(store: EventStore, options?: { readV1?: () => JobRecord[] }) {
-    this.store = store; this.readV1 = options?.readV1 ?? readJobs;
+  constructor(store: EventStore, options?: { readV1?: () => JobRecord[]; snapshot?: () => ProcessIdentity[] }) {
+    this.store = store; this.readV1 = options?.readV1 ?? readJobs; this.takeSnapshot = options?.snapshot ?? processSnapshot;
   }
 
   rebuild(): IndexRebuildStats {
@@ -175,6 +175,17 @@ export class JobIndex {
 
   private reloadV1(): void {
     this.v1.clear();
-    for (const record of this.readV1()) if (!this.fleet.has(record.jobId)) this.v1.set(record.jobId, migrateV1Record(record));
+    const records = this.readV1().filter((record) => !this.fleet.has(record.jobId));
+    if (records.length === 0) return;
+    let snapshot = this.snapshotCache;
+    if (snapshot === undefined || performance.now() - snapshot.at >= 5000) {
+      try { snapshot = { at: performance.now(), value: this.takeSnapshot() }; }
+      catch { snapshot = { at: performance.now() }; }
+      this.snapshotCache = snapshot;
+    }
+    for (const record of records) {
+      if (snapshot.value !== undefined && isStaleJob(record, snapshot.value)) continue;
+      this.v1.set(record.jobId, migrateV1Record(record));
+    }
   }
 }
