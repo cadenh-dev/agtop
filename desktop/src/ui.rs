@@ -56,6 +56,7 @@ pub struct Workbench {
     _poll: Task<()>,
     focus: FocusHandle,
     last_success: Option<Instant>,
+    poll_failed: bool,
     error: Option<String>,
     notice: Option<String>,
     busy: bool,
@@ -96,6 +97,7 @@ impl Workbench {
             _poll: poll,
             focus,
             last_success: None,
+            poll_failed: false,
             error: None,
             notice: None,
             busy: false,
@@ -118,18 +120,22 @@ impl Workbench {
                             .total_cmp(&a.total_cpu_percent)
                             .then_with(|| a.root_pid.cmp(&b.root_pid))
                     });
-                    if let Some(selected) = refreshed_selection(&agents, self.selected.as_deref()) {
-                        let current = self.selected.as_deref();
-                        if current.is_some_and(|id| self.jobs.iter().any(|job| job.job_id == id)) {
-                            self.agents = agents;
-                            self.last_success = Some(Instant::now());
-                            self.error = None;
-                            continue;
-                        }
+                    let retained_fleet_selection = self.selected.as_deref().is_some_and(|id| {
+                        !agents.iter().any(|agent| agent.job_id == id)
+                            && self.jobs.iter().any(|job| job.job_id == id)
+                    });
+                    if let Some(selected) =
+                        refreshed_selection_with_jobs(&agents, &self.jobs, self.selected.as_deref())
+                    {
                         self.selected = selected;
                         self.confirm = None;
                     }
                     self.agents = agents;
+                    self.jobs = merge_fleet_jobs(&self.agents, std::mem::take(&mut self.jobs));
+                    if retained_fleet_selection {
+                        self.filter = 3;
+                        self.role_filter = None;
+                    }
                     if self
                         .role_filter
                         .as_deref()
@@ -138,11 +144,27 @@ impl Workbench {
                         self.role_filter = None;
                     }
                     self.last_success = Some(Instant::now());
-                    self.error = None;
-                    self.error = None;
+                    self.poll_failed = false;
+                    clear_banner_on_success(&mut self.error);
                 }
                 Event::Jobs(jobs) => {
-                    self.jobs = jobs;
+                    self.jobs = merge_fleet_jobs(&self.agents, jobs);
+                    if self
+                        .selected
+                        .as_deref()
+                        .is_some_and(|id| self.jobs.iter().any(|job| job.job_id == id))
+                    {
+                        if let (Some(detail), Some(job)) = (
+                            self.detail.as_mut(),
+                            self.jobs
+                                .iter()
+                                .find(|job| Some(job.job_id.as_str()) == self.selected.as_deref()),
+                        ) {
+                            detail.state = job.state.clone();
+                            detail.exit_code = job.exit_code;
+                            detail.capture_note = !job.captured;
+                        }
+                    }
                 }
                 Event::Harnesses(catalog) => {
                     if !catalog.is_empty() {
@@ -155,9 +177,15 @@ impl Workbench {
                     self.busy = false;
                     self.confirm = None;
                 }
+                Event::PollError(error) => {
+                    self.error = Some(error);
+                    self.poll_failed = true;
+                    self.busy = false;
+                    self.confirm = None;
+                }
                 Event::Completed(message) => {
                     self.notice = Some(message);
-                    self.error = None;
+                    clear_banner_on_success(&mut self.error);
                     self.busy = false;
                     self.confirm = None;
                 }
@@ -196,12 +224,29 @@ impl Workbench {
             return;
         }
         self.watched = wanted.clone();
-        self.detail = wanted.as_ref().map(|id| JobDetail::new(id.clone()));
-        self.send(Command::WatchJob(wanted));
+        self.detail = wanted.as_ref().map(|id| {
+            let mut detail = JobDetail::new(id.clone());
+            if let Some(job) = self.jobs.iter().find(|job| &job.job_id == id) {
+                detail.state = job.state.clone();
+                detail.exit_code = job.exit_code;
+                detail.capture_note = !job.captured;
+            } else if self
+                .agents
+                .iter()
+                .any(|agent| &agent.job_id == id && !agent.managed())
+            {
+                detail.capture_note = true;
+            }
+            detail
+        });
+        let watch = wanted.and_then(|id| watch_target(&self.agents, &self.jobs, id));
+        self.send(Command::WatchJob(watch));
     }
     fn connected(&self) -> bool {
-        self.last_success
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(8))
+        !self.poll_failed
+            && self
+                .last_success
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(8))
     }
     fn send(&mut self, command: Command) {
         if self.commands.send(command).is_err() {
@@ -1027,6 +1072,50 @@ fn refreshed_selection(agents: &[Agent], selected: Option<&str>) -> Option<Optio
     }
 }
 
+fn refreshed_selection_with_jobs(
+    agents: &[Agent],
+    jobs: &[JobSummary],
+    selected: Option<&str>,
+) -> Option<Option<String>> {
+    if selected.is_some_and(|id| jobs.iter().any(|job| job.job_id == id)) {
+        return None;
+    }
+    refreshed_selection(agents, selected)
+}
+
+fn merge_fleet_jobs(agents: &[Agent], mut jobs: Vec<JobSummary>) -> Vec<JobSummary> {
+    for agent in agents {
+        if agent.managed() && !jobs.iter().any(|job| job.job_id == agent.job_id) {
+            jobs.push(JobSummary {
+                job_id: agent.job_id.clone(),
+                state: "running".into(),
+                harness: agent.harness.clone(),
+                root_pid: Some(agent.root_pid),
+                captured: true,
+                ..Default::default()
+            });
+        }
+    }
+    jobs
+}
+
+fn watch_target(agents: &[Agent], jobs: &[JobSummary], id: String) -> Option<(String, bool, bool)> {
+    if let Some(job) = jobs.iter().find(|job| job.job_id == id) {
+        Some((id, crate::job_detail::is_terminal(&job.state), job.captured))
+    } else if agents
+        .iter()
+        .any(|agent| agent.job_id == id && !agent.managed())
+    {
+        None
+    } else {
+        Some((id, false, true))
+    }
+}
+
+fn clear_banner_on_success(error: &mut Option<String>) {
+    *error = None;
+}
+
 fn matching_harnesses(harnesses: &[Harness], query: &str) -> Vec<Harness> {
     harnesses
         .iter()
@@ -1245,7 +1334,9 @@ impl Render for Workbench {
                             .justify_between()
                             .text_size(px(11.))
                             .text_color(color(MUTED))
-                            .child(if self.connected() {
+                            .child(if self.poll_failed {
+                                "Disconnected from local manager  |  Showing the last successful snapshot"
+                            } else if self.connected() {
                                 "Connected to local manager  |  Updates every 2 seconds"
                             } else if self.last_success.is_some() {
                                 "Connection stale  |  Showing the last successful snapshot"
@@ -1279,10 +1370,12 @@ pub fn init(cx: &mut App) {
 mod tests {
     use super::{
         NEW_AGENT_SHORTCUT, QUIT_SHORTCUT, REFRESH_SHORTCUT, WorkbenchAction, cancel_confirmation,
-        fallback_harnesses, filtered_agents, format_accel, keep_role_filter, matching_harnesses,
-        refreshed_selection, request_stop, shortcut_action, validate_launch_arguments,
+        clear_banner_on_success, fallback_harnesses, filtered_agents, format_accel,
+        keep_role_filter, matching_harnesses, merge_fleet_jobs, refreshed_selection,
+        refreshed_selection_with_jobs, request_stop, shortcut_action, validate_launch_arguments,
+        watch_target,
     };
-    use crate::model::{AcceleratorUsage, Agent, Process, ROLE_ORDER, role_label};
+    use crate::model::{AcceleratorUsage, Agent, JobSummary, Process, ROLE_ORDER, role_label};
 
     fn agent(id: &str, harness: &str, branch: &str, pid: u32) -> Agent {
         Agent {
@@ -1404,6 +1497,71 @@ mod tests {
             Some(Some("job-1".into()))
         );
         assert_eq!(refreshed_selection(&[], Some("removed")), Some(None));
+    }
+
+    #[test]
+    fn fleet_job_merge_keeps_terminal_summaries_and_adds_live_trees_once() {
+        let agents = vec![agent("running", "codex", "main", 100)];
+        let jobs = vec![JobSummary {
+            job_id: "lost".into(),
+            state: "lost".into(),
+            captured: true,
+            ..Default::default()
+        }];
+        let listed = merge_fleet_jobs(&agents, jobs);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["lost", "running"]
+        );
+        assert_eq!(listed[0].state, "lost");
+        assert_eq!(listed[1].state, "running");
+    }
+
+    #[test]
+    fn selected_fleet_job_survives_disappearing_process_tree() {
+        let terminal = JobSummary {
+            job_id: "job-2".into(),
+            state: "lost".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            refreshed_selection_with_jobs(&[], &[terminal], Some("job-2")),
+            None
+        );
+        assert_eq!(
+            refreshed_selection_with_jobs(&[], &[], Some("job-2")),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn successful_poll_clears_connection_banner() {
+        let mut banner = Some("io: Connection refused".to_owned());
+        clear_banner_on_success(&mut banner);
+        assert_eq!(banner, None);
+    }
+
+    #[test]
+    fn discovered_processes_are_not_watched_as_fleet_jobs() {
+        let mut passive = agent("passive-claude-code-736929", "claude", "main", 736929);
+        passive.containment_mode = "passive-ppid".into();
+        assert_eq!(
+            watch_target(&[passive], &[], "passive-claude-code-736929".into()),
+            None
+        );
+        let job = JobSummary {
+            job_id: "done".into(),
+            state: "killed".into(),
+            captured: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            watch_target(&[], &[job], "done".into()),
+            Some(("done".into(), true, true))
+        );
     }
 
     #[test]

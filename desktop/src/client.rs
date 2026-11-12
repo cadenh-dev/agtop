@@ -165,7 +165,7 @@ pub enum Command {
     },
     Launch(Launch),
     /// Some(id): start polling this job's output and events. None: stop.
-    WatchJob(Option<String>),
+    WatchJob(Option<(String, bool, bool)>),
 }
 pub enum Event {
     Snapshot(Vec<Agent>),
@@ -173,6 +173,7 @@ pub enum Event {
     Harnesses(Vec<Harness>),
     Lemonade(Lemonade),
     Error(String),
+    PollError(String),
     Completed(String),
     Launched(String),
     JobOutput { id: String, page: OutputPage },
@@ -190,7 +191,7 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
         }
         let mut next_probe = Instant::now();
         let mut first = true;
-        let mut watched: Option<(String, u64, u64)> = None;
+        let mut watched: Option<(String, u64, u64, bool, bool)> = None;
         loop {
             let command = if first {
                 first = false;
@@ -203,8 +204,8 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
             let action: Result<Option<Event>> = match command {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) | Ok(Command::Refresh) => Ok(None),
-                Ok(Command::WatchJob(id)) => {
-                    watched = id.map(|id| (id, 0, 0));
+                Ok(Command::WatchJob(job)) => {
+                    watched = job.map(|(id, terminal, captured)| (id, 0, 0, terminal, captured));
                     Ok(None)
                 }
                 Ok(Command::Stop { id, start_time }) => (|| {
@@ -264,7 +265,7 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
                     }
                 }
                 Err(e) => {
-                    if events.send(Event::Error(format!("{e:#}"))).is_err() {
+                    if events.send(Event::PollError(format!("{e:#}"))).is_err() {
                         break;
                     }
                 }
@@ -275,11 +276,14 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
                 }
                 next_probe = Instant::now() + Duration::from_secs(15);
             }
-            if let Some((id, output_cursor, event_cursor)) = watched.take() {
-                let (output_cursor, event_cursor, keep) =
-                    poll_detail(&client, &id, output_cursor, event_cursor, &events);
+            if let Some((id, output_cursor, event_cursor, terminal, captured)) = watched.take() {
+                let (output_cursor, event_cursor, keep) = if captured {
+                    poll_detail(&client, &id, output_cursor, event_cursor, terminal, &events)
+                } else {
+                    (output_cursor, event_cursor, false)
+                };
                 if keep {
-                    watched = Some((id, output_cursor, event_cursor));
+                    watched = Some((id, output_cursor, event_cursor, terminal, captured));
                 }
             }
         }
@@ -296,10 +300,11 @@ fn poll_detail(
     id: &str,
     mut output_cursor: u64,
     mut event_cursor: u64,
+    terminal_job: bool,
     events: &Sender<Event>,
 ) -> (u64, u64, bool) {
     let mut keep = true;
-    let mut terminal = false;
+    let mut terminal = terminal_job;
     for _ in 0..MAX_PAGES_PER_TICK {
         match client.get::<OutputPage>(&output_request(id, output_cursor)) {
             Ok(page) => {

@@ -87,6 +87,7 @@ pub struct JobDetail {
     pub state: String,
     pub exit_code: Option<i64>,
     pub unavailable: Option<String>,
+    pub capture_note: bool,
 }
 
 impl JobDetail {
@@ -99,6 +100,7 @@ impl JobDetail {
             state: String::new(),
             exit_code: None,
             unavailable: None,
+            capture_note: false,
         }
     }
 
@@ -205,6 +207,11 @@ pub fn render(detail: Option<&JobDetail>, job_id: &str) -> Stateful<Div> {
             .text_color(color(tone))
             .child(format!("State: {state}{exit}")),
     );
+    if detail.capture_note {
+        return pane.child(caption(
+            "Output is captured only for jobs started through agtop.",
+        ));
+    }
     if let Some(message) = &detail.unavailable {
         return pane.child(
             div()
