@@ -1,5 +1,7 @@
 use crate::job_detail::{advance_cursor, events_request, is_terminal, output_request};
-use crate::model::{Agent, EventsPage, Harness, KillResult, Launch, Lemonade, OutputPage};
+use crate::model::{
+    Agent, EventsPage, Harness, JobSummary, JobsPage, KillResult, Launch, Lemonade, OutputPage,
+};
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use std::{
@@ -163,17 +165,21 @@ pub enum Command {
     },
     Launch(Launch),
     /// Some(id): start polling this job's output and events. None: stop.
-    WatchJob(Option<String>),
+    WatchJob(Option<(String, bool, bool)>),
 }
 pub enum Event {
     Snapshot(Vec<Agent>),
+    Jobs(Vec<JobSummary>),
+    JobsError(String),
     Harnesses(Vec<Harness>),
     Lemonade(Lemonade),
     Error(String),
+    PollError(String),
     Completed(String),
     Launched(String),
     JobOutput { id: String, page: OutputPage },
     JobEvents { id: String, page: EventsPage },
+    JobDetailError { id: String, message: String },
     JobDetailUnavailable { id: String, message: String },
 }
 
@@ -187,7 +193,7 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
         }
         let mut next_probe = Instant::now();
         let mut first = true;
-        let mut watched: Option<(String, u64, u64)> = None;
+        let mut watched: Option<(String, u64, u64, bool, bool)> = None;
         loop {
             let command = if first {
                 first = false;
@@ -200,8 +206,8 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
             let action: Result<Option<Event>> = match command {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) | Ok(Command::Refresh) => Ok(None),
-                Ok(Command::WatchJob(id)) => {
-                    watched = id.map(|id| (id, 0, 0));
+                Ok(Command::WatchJob(job)) => {
+                    watched = job.map(|(id, terminal, captured)| (id, 0, 0, terminal, captured));
                     Ok(None)
                 }
                 Ok(Command::Stop { id, start_time }) => (|| {
@@ -253,12 +259,22 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
             }
             match client.get("/v1/agents") {
                 Ok(agents) => {
+                    match fetch_jobs(&client) {
+                        Ok(jobs) => {
+                            let _ = events.send(Event::Jobs(jobs));
+                        }
+                        Err(error) => {
+                            let _ = events.send(Event::JobsError(format!(
+                                "Fleet jobs could not be refreshed: {error:#}"
+                            )));
+                        }
+                    }
                     if events.send(Event::Snapshot(agents)).is_err() {
                         break;
                     }
                 }
                 Err(e) => {
-                    if events.send(Event::Error(format!("{e:#}"))).is_err() {
+                    if events.send(Event::PollError(format!("{e:#}"))).is_err() {
                         break;
                     }
                 }
@@ -269,11 +285,18 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
                 }
                 next_probe = Instant::now() + Duration::from_secs(15);
             }
-            if let Some((id, output_cursor, event_cursor)) = watched.take() {
-                let (output_cursor, event_cursor, keep) =
-                    poll_detail(&client, &id, output_cursor, event_cursor, &events);
+            if let Some((id, output_cursor, event_cursor, terminal, captured)) = watched.take() {
+                let (output_cursor, event_cursor, keep) = poll_detail(
+                    &client,
+                    &id,
+                    output_cursor,
+                    event_cursor,
+                    terminal,
+                    captured,
+                    &events,
+                );
                 if keep {
-                    watched = Some((id, output_cursor, event_cursor));
+                    watched = Some((id, output_cursor, event_cursor, terminal, captured));
                 }
             }
         }
@@ -284,22 +307,59 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
 /// Bounds the work of one polling tick so a job with a large backlog cannot
 /// monopolise the worker. The cursor resumes on the next tick.
 const MAX_PAGES_PER_TICK: usize = 20;
+const MAX_JOB_LIST_PAGES: usize = 10;
+
+fn fetch_jobs(client: &Client) -> Result<Vec<JobSummary>> {
+    let mut jobs: Vec<JobSummary> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut after: Option<String> = None;
+    for _ in 0..MAX_JOB_LIST_PAGES {
+        let path = after.as_ref().map_or_else(
+            || "/v1/jobs?limit=500".to_owned(),
+            |cursor| format!("/v1/jobs?limit=500&after={}", encode_segment(cursor)),
+        );
+        let page: JobsPage = client.get(&path)?;
+        // The daemon restarts from the first page when the cursor job vanished
+        // between requests, so a later page can repeat earlier jobs.
+        jobs.extend(
+            page.jobs
+                .into_iter()
+                .filter(|job| seen.insert(job.job_id.clone())),
+        );
+        let Some(next) = page.next_after.filter(|next| !next.is_empty()) else {
+            break;
+        };
+        after = Some(next);
+    }
+    Ok(jobs)
+}
 
 fn poll_detail(
     client: &Client,
     id: &str,
     mut output_cursor: u64,
     mut event_cursor: u64,
+    terminal_job: bool,
+    captured: bool,
     events: &Sender<Event>,
 ) -> (u64, u64, bool) {
+    // The daemon answers both output and events with E_CAPTURE_DISABLED for a
+    // job started without capture; its state arrives with the job list instead.
+    if !captured {
+        return (output_cursor, event_cursor, false);
+    }
     let mut keep = true;
-    let mut terminal = false;
+    let mut terminal = terminal_job;
+    let mut output_more = false;
+    let mut events_more = false;
     for _ in 0..MAX_PAGES_PER_TICK {
         match client.get::<OutputPage>(&output_request(id, output_cursor)) {
             Ok(page) => {
                 terminal |= is_terminal(&page.state);
-                let more = page.has_more;
-                output_cursor = advance_cursor(output_cursor, page.next_since);
+                let next = advance_cursor(output_cursor, page.next_since);
+                let more = made_progress(page.has_more, output_cursor, next);
+                output_more = more;
+                output_cursor = next;
                 if events
                     .send(Event::JobOutput {
                         id: id.to_owned(),
@@ -323,8 +383,10 @@ fn poll_detail(
         for _ in 0..MAX_PAGES_PER_TICK {
             match client.get::<EventsPage>(&events_request(id, event_cursor)) {
                 Ok(page) => {
-                    let more = page.has_more;
-                    event_cursor = advance_cursor(event_cursor, page.next_since);
+                    let next = advance_cursor(event_cursor, page.next_since);
+                    let more = made_progress(page.has_more, event_cursor, next);
+                    events_more = more;
+                    event_cursor = next;
                     if events
                         .send(Event::JobEvents {
                             id: id.to_owned(),
@@ -345,7 +407,21 @@ fn poll_detail(
             }
         }
     }
-    (output_cursor, event_cursor, keep && !terminal)
+    (
+        output_cursor,
+        event_cursor,
+        keep && should_keep_detail_watch(terminal, output_more, events_more),
+    )
+}
+
+/// A page that reports more data but does not move the cursor would make the
+/// watch refetch the same page forever; treat it as drained.
+fn made_progress(has_more: bool, cursor: u64, next: u64) -> bool {
+    has_more && next > cursor
+}
+
+fn should_keep_detail_watch(terminal: bool, output_more: bool, events_more: bool) -> bool {
+    !terminal || output_more || events_more
 }
 
 /// Reports a detail request failure. Returns whether the job stays watched.
@@ -353,7 +429,7 @@ fn detail_failure(error: &anyhow::Error, id: &str, events: &Sender<Event>) -> bo
     let status = error
         .downcast_ref::<HttpStatusError>()
         .map(|error| error.status);
-    if matches!(status, Some(404 | 409 | 410)) {
+    if matches!(status, Some(400 | 403 | 404 | 409 | 410)) {
         let message = format!("{error:#}");
         let _ = events.send(Event::JobDetailUnavailable {
             id: id.to_owned(),
@@ -361,8 +437,53 @@ fn detail_failure(error: &anyhow::Error, id: &str, events: &Sender<Event>) -> bo
         });
         false
     } else {
-        let _ = events.send(Event::Error(format!("{error:#}")));
+        let _ = events.send(Event::JobDetailError {
+            id: id.to_owned(),
+            message: format!("{error:#}"),
+        });
         true
+    }
+}
+
+#[cfg(test)]
+mod detail_decision_tests {
+    use super::{HttpStatusError, detail_failure, made_progress, should_keep_detail_watch};
+    use std::sync::mpsc;
+
+    #[test]
+    fn terminal_detail_watch_waits_for_both_streams_to_drain() {
+        assert!(should_keep_detail_watch(true, true, false));
+        assert!(should_keep_detail_watch(true, false, true));
+        assert!(!should_keep_detail_watch(true, false, false));
+        assert!(should_keep_detail_watch(false, false, false));
+    }
+
+    #[test]
+    fn a_page_that_claims_more_without_advancing_counts_as_drained() {
+        assert!(made_progress(true, 10, 20));
+        assert!(!made_progress(true, 10, 10));
+        assert!(!made_progress(false, 10, 20));
+        // A terminal job whose stalled page never advances stops being watched.
+        assert!(!should_keep_detail_watch(
+            true,
+            made_progress(true, 7, 7),
+            false
+        ));
+    }
+
+    #[test]
+    fn ownership_and_bad_request_failures_stop_detail_watch_as_unavailable() {
+        for status in [400, 403] {
+            let (tx, rx) = mpsc::channel();
+            let error = anyhow::Error::new(HttpStatusError {
+                status,
+                message: format!("HTTP {status}"),
+            });
+            assert!(!detail_failure(&error, "job", &tx));
+            assert!(
+                matches!(rx.recv().unwrap(), super::Event::JobDetailUnavailable { id, .. } if id == "job")
+            );
+        }
     }
 }
 

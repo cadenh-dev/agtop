@@ -14,6 +14,21 @@ pub const PAGE_MAX_BYTES: u64 = 262_144;
 pub const EVENT_PAGE_LIMIT: u64 = 200;
 const VISIBLE_EVENTS: usize = 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureNote {
+    Discovered,
+    NotCaptured,
+}
+
+impl CaptureNote {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Discovered => "Not started through agtop; output is not captured.",
+            Self::NotCaptured => "This job was started without output capture.",
+        }
+    }
+}
+
 /// Output request for the next poll. A zero cursor is the first request.
 pub fn output_request(job_id: &str, cursor: u64) -> String {
     let id = encode_segment(job_id);
@@ -87,6 +102,8 @@ pub struct JobDetail {
     pub state: String,
     pub exit_code: Option<i64>,
     pub unavailable: Option<String>,
+    pub request_error: Option<String>,
+    pub capture_note: Option<CaptureNote>,
 }
 
 impl JobDetail {
@@ -99,6 +116,8 @@ impl JobDetail {
             state: String::new(),
             exit_code: None,
             unavailable: None,
+            request_error: None,
+            capture_note: None,
         }
     }
 
@@ -106,6 +125,7 @@ impl JobDetail {
         if page.job_id != self.job_id {
             return;
         }
+        self.request_error = None;
         for chunk in &page.chunks {
             if chunk.truncated {
                 let info = match chunk.stream.as_str() {
@@ -133,6 +153,7 @@ impl JobDetail {
     }
 
     pub fn apply_events(&mut self, page: EventsPage) {
+        self.request_error = None;
         self.events.extend(page.events);
     }
 
@@ -205,10 +226,21 @@ pub fn render(detail: Option<&JobDetail>, job_id: &str) -> Stateful<Div> {
             .text_color(color(tone))
             .child(format!("State: {state}{exit}")),
     );
+    if let Some(note) = detail.capture_note {
+        pane = pane.child(caption(note.message()));
+    }
     if let Some(message) = &detail.unavailable {
         return pane.child(
             div()
                 .text_size(px(13.))
+                .text_color(color(DANGER))
+                .child(message.clone()),
+        );
+    }
+    if let Some(message) = &detail.request_error {
+        pane = pane.child(
+            div()
+                .text_size(px(12.))
                 .text_color(color(DANGER))
                 .child(message.clone()),
         );
@@ -218,7 +250,9 @@ pub fn render(detail: Option<&JobDetail>, job_id: &str) -> Stateful<Div> {
     }
 
     let mut output = scroll_box("job-output-lines", 220.).flex().flex_col();
-    if detail.lines.is_empty() {
+    if detail.capture_note.is_some() {
+        output = output.child(caption("No output captured."));
+    } else if detail.lines.is_empty() {
         output = output.child(caption("No output captured yet."));
     }
     for (index, (stream, line)) in detail.lines.iter().enumerate() {

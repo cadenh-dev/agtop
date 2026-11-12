@@ -1,8 +1,8 @@
 use crate::{
     client::{Command, Config, Event},
     input::TextInput,
-    job_detail::JobDetail,
-    model::{Agent, Harness, Launch, Lemonade, parse_arguments},
+    job_detail::{CaptureNote, JobDetail},
+    model::{Agent, Harness, JobSummary, Launch, Lemonade, parse_arguments},
     theme::*,
 };
 use gpui::{div, prelude::*, *};
@@ -45,9 +45,10 @@ struct LaunchForm {
 
 pub struct Workbench {
     agents: Vec<Agent>,
+    jobs: Vec<JobSummary>,
     harnesses: Vec<Harness>,
     selected: Option<String>,
-    filter: u8,
+    filter: AgentFilter,
     role_filter: Option<String>,
     search: Entity<TextInput>,
     commands: Sender<Command>,
@@ -55,7 +56,10 @@ pub struct Workbench {
     _poll: Task<()>,
     focus: FocusHandle,
     last_success: Option<Instant>,
+    poll_failed: bool,
     error: Option<String>,
+    connection_error: Option<String>,
+    jobs_error: Option<String>,
     notice: Option<String>,
     busy: bool,
     lemonade: Option<Lemonade>,
@@ -63,6 +67,40 @@ pub struct Workbench {
     confirm: Option<Agent>,
     detail: Option<JobDetail>,
     watched: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentFilter {
+    Jobs,
+    AllAgents,
+    Managed,
+    Discovered,
+}
+
+#[derive(Clone, Copy)]
+enum BannerEvent<'a> {
+    OperatorError(&'a str),
+    PollError(&'a str),
+    DetailError,
+    Snapshot,
+    Dismiss,
+}
+
+fn reduce_banner(
+    operator: &mut Option<String>,
+    connection: &mut Option<String>,
+    event: BannerEvent<'_>,
+) {
+    match event {
+        BannerEvent::OperatorError(message) => *operator = Some(message.to_owned()),
+        BannerEvent::PollError(message) => *connection = Some(message.to_owned()),
+        BannerEvent::DetailError => {}
+        BannerEvent::Snapshot => *connection = None,
+        BannerEvent::Dismiss => {
+            *operator = None;
+            *connection = None;
+        }
+    }
 }
 
 impl Workbench {
@@ -84,9 +122,10 @@ impl Workbench {
         });
         Self {
             agents: vec![],
+            jobs: vec![],
             harnesses: fallback_harnesses(),
             selected: None,
-            filter: 0,
+            filter: AgentFilter::AllAgents,
             role_filter: None,
             search,
             commands,
@@ -94,7 +133,10 @@ impl Workbench {
             _poll: poll,
             focus,
             last_success: None,
+            poll_failed: false,
             error: None,
+            connection_error: None,
+            jobs_error: None,
             notice: None,
             busy: false,
             lemonade: None,
@@ -111,25 +153,51 @@ impl Workbench {
             changed = true;
             match event {
                 Event::Snapshot(mut agents) => {
+                    self.filter = snapshot_filter(self.filter);
                     agents.sort_by(|a, b| {
                         b.total_cpu_percent
                             .total_cmp(&a.total_cpu_percent)
                             .then_with(|| a.root_pid.cmp(&b.root_pid))
                     });
-                    if let Some(selected) = refreshed_selection(&agents, self.selected.as_deref()) {
+                    if let Some(selected) =
+                        refreshed_selection_with_jobs(&agents, &self.jobs, self.selected.as_deref())
+                    {
                         self.selected = selected;
                         self.confirm = None;
                     }
                     self.agents = agents;
-                    if self
-                        .role_filter
-                        .as_deref()
-                        .is_some_and(|role| !keep_role_filter(&self.agents, Some(role)))
-                    {
-                        self.role_filter = None;
-                    }
+                    self.jobs = merge_fleet_jobs(&self.agents, std::mem::take(&mut self.jobs));
                     self.last_success = Some(Instant::now());
+                    self.poll_failed = false;
+                    reduce_banner(
+                        &mut self.error,
+                        &mut self.connection_error,
+                        BannerEvent::Snapshot,
+                    );
                 }
+                Event::Jobs(jobs) => {
+                    self.jobs = merge_fleet_jobs(&self.agents, jobs);
+                    self.jobs_error = None;
+                    if self
+                        .selected
+                        .as_deref()
+                        .is_some_and(|id| self.jobs.iter().any(|job| job.job_id == id))
+                    {
+                        if let (Some(detail), Some(job)) = (
+                            self.detail.as_mut(),
+                            self.jobs
+                                .iter()
+                                .find(|job| Some(job.job_id.as_str()) == self.selected.as_deref()),
+                        ) {
+                            if detail.job_id == job.job_id {
+                                detail.state = job.state.clone();
+                                detail.exit_code = job.exit_code;
+                                sync_detail_summary(detail, job);
+                            }
+                        }
+                    }
+                }
+                Event::JobsError(error) => self.jobs_error = Some(error),
                 Event::Harnesses(catalog) => {
                     if !catalog.is_empty() {
                         self.harnesses = catalog;
@@ -137,9 +205,21 @@ impl Workbench {
                 }
                 Event::Lemonade(status) => self.lemonade = Some(status),
                 Event::Error(error) => {
-                    self.error = Some(error);
+                    reduce_banner(
+                        &mut self.error,
+                        &mut self.connection_error,
+                        BannerEvent::OperatorError(&error),
+                    );
                     self.busy = false;
                     self.confirm = None;
+                }
+                Event::PollError(error) => {
+                    reduce_banner(
+                        &mut self.error,
+                        &mut self.connection_error,
+                        BannerEvent::PollError(&error),
+                    );
+                    self.poll_failed = true;
                 }
                 Event::Completed(message) => {
                     self.notice = Some(message);
@@ -160,7 +240,15 @@ impl Workbench {
                 Event::JobEvents { id, page } => {
                     self.with_detail(&id, |detail| detail.apply_events(page))
                 }
+                Event::JobDetailError { id, message } => {
+                    self.with_detail(&id, |detail| detail.request_error = Some(message))
+                }
                 Event::JobDetailUnavailable { id, message } => {
+                    reduce_banner(
+                        &mut self.error,
+                        &mut self.connection_error,
+                        BannerEvent::DetailError,
+                    );
                     self.with_detail(&id, |detail| detail.unavailable = Some(message))
                 }
             }
@@ -182,12 +270,29 @@ impl Workbench {
             return;
         }
         self.watched = wanted.clone();
-        self.detail = wanted.as_ref().map(|id| JobDetail::new(id.clone()));
-        self.send(Command::WatchJob(wanted));
+        self.detail = wanted.as_ref().map(|id| {
+            let mut detail = JobDetail::new(id.clone());
+            if let Some(job) = self.jobs.iter().find(|job| &job.job_id == id) {
+                detail.state = job.state.clone();
+                detail.exit_code = job.exit_code;
+                detail.capture_note = capture_note_for_job(job.captured);
+            } else if self
+                .agents
+                .iter()
+                .any(|agent| &agent.job_id == id && !agent.managed())
+            {
+                detail.capture_note = Some(CaptureNote::Discovered);
+            }
+            detail
+        });
+        let watch = wanted.and_then(|id| watch_target(&self.agents, &self.jobs, id));
+        self.send(Command::WatchJob(watch));
     }
     fn connected(&self) -> bool {
-        self.last_success
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(8))
+        !self.poll_failed
+            && self
+                .last_success
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(8))
     }
     fn send(&mut self, command: Command) {
         if self.commands.send(command).is_err() {
@@ -333,6 +438,21 @@ impl Workbench {
                     .child("agtop"),
             )
             .child(Self::caption("Agent process manager").mb_6())
+            .child(
+                Self::action(
+                    "nav-jobs",
+                    format!("Jobs   {}", self.jobs.len()),
+                    self.filter == AgentFilter::Jobs,
+                    |this, _, cx| {
+                        this.filter = AgentFilter::Jobs;
+                        this.role_filter = None;
+                        this.form = None;
+                        cx.notify();
+                    },
+                    cx,
+                )
+                .justify_start(),
+            )
             .children(
                 [
                     ("All agents", self.agents.len()),
@@ -340,15 +460,24 @@ impl Workbench {
                     ("Discovered", self.agents.len() - managed),
                 ]
                 .into_iter()
-                .enumerate()
-                .map(|(index, (name, count))| {
+                .zip([
+                    AgentFilter::AllAgents,
+                    AgentFilter::Managed,
+                    AgentFilter::Discovered,
+                ])
+                .map(|((name, count), filter)| {
                     Self::action(
-                        ("nav", index),
+                        match filter {
+                            AgentFilter::AllAgents => "nav-all-agents",
+                            AgentFilter::Managed => "nav-managed",
+                            AgentFilter::Discovered => "nav-discovered",
+                            AgentFilter::Jobs => "nav-jobs",
+                        },
                         format!("{name}   {count}"),
-                        self.filter == index as u8,
+                        self.filter == filter,
                         move |this, _, cx| {
-                            this.filter = index as u8;
-                            if index == 0 {
+                            this.filter = filter;
+                            if filter == AgentFilter::AllAgents {
                                 this.role_filter = None;
                             }
                             this.form = None;
@@ -368,6 +497,7 @@ impl Workbench {
                     format!("{}   {}", crate::model::role_label(role), count),
                     active,
                     move |this, _, cx| {
+                        this.filter = AgentFilter::AllAgents;
                         this.role_filter = if this.role_filter.as_deref() == Some(&role_id) {
                             None
                         } else {
@@ -483,6 +613,65 @@ impl Workbench {
             )
     }
     fn list(&self, cx: &Context<Self>) -> Div {
+        if self.filter == AgentFilter::Jobs {
+            return div()
+                .w(px(340.))
+                .flex_shrink_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .border_r_1()
+                .border_color(color(LINE))
+                .child(
+                    div()
+                        .id("fleet-job-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .children(
+                            self.jobs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, j)| {
+                                    let id = j.job_id.clone();
+                                    let selected = self.selected.as_deref() == Some(&id);
+                                    div()
+                                        .id(("fleet-job", i))
+                                        .p_4()
+                                        .border_b_1()
+                                        .border_color(color(if selected { ACCENT } else { LINE }))
+                                        .bg(color(if selected { RAISED } else { BACKGROUND }))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.selected = Some(id.clone());
+                                            this.filter = AgentFilter::Jobs;
+                                            this.form = None;
+                                            this.watch_selected();
+                                            cx.notify();
+                                        }))
+                                        .child(format!("{} · {}", j.job_id, j.state))
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .when(self.jobs.is_empty(), |s| {
+                            s.child(
+                                div()
+                                    .p_5()
+                                    .text_color(color(MUTED))
+                                    .child("No fleet jobs yet."),
+                            )
+                        })
+                        .when(self.jobs_error.is_some(), |s| {
+                            s.child(
+                                div()
+                                    .p_4()
+                                    .text_size(px(12.))
+                                    .text_color(color(MUTED))
+                                    .child(self.jobs_error.clone().unwrap_or_default()),
+                            )
+                        }),
+                );
+        }
         let query = self.search.read(cx).content.as_ref();
         let agents = filtered_agents(
             &self.agents,
@@ -924,23 +1113,19 @@ fn fallback_harnesses() -> Vec<Harness> {
 fn filtered_agents<'a>(
     agents: &'a [Agent],
     query: &str,
-    filter: u8,
+    filter: AgentFilter,
     role: Option<&str>,
 ) -> Vec<&'a Agent> {
     agents
         .iter()
         .filter(|agent| {
             agent.matches(query)
-                && (filter == 0
-                    || (filter == 1 && agent.managed())
-                    || (filter == 2 && !agent.managed()))
+                && (filter == AgentFilter::AllAgents
+                    || (filter == AgentFilter::Managed && agent.managed())
+                    || (filter == AgentFilter::Discovered && !agent.managed()))
                 && role.map_or(true, |role| agent.has_role(role))
         })
         .collect()
-}
-
-fn keep_role_filter(agents: &[Agent], role: Option<&str>) -> bool {
-    role.is_none_or(|role| agents.iter().any(|agent| agent.has_role(role)))
 }
 
 fn format_accel(process: &crate::model::Process, kind: &str) -> String {
@@ -972,6 +1157,64 @@ fn refreshed_selection(agents: &[Agent], selected: Option<&str>) -> Option<Optio
         None
     } else {
         Some(agents.first().map(|agent| agent.job_id.clone()))
+    }
+}
+
+fn refreshed_selection_with_jobs(
+    agents: &[Agent],
+    jobs: &[JobSummary],
+    selected: Option<&str>,
+) -> Option<Option<String>> {
+    if selected.is_some_and(|id| jobs.iter().any(|job| job.job_id == id)) {
+        return None;
+    }
+    refreshed_selection(agents, selected)
+}
+
+fn merge_fleet_jobs(agents: &[Agent], mut jobs: Vec<JobSummary>) -> Vec<JobSummary> {
+    for agent in agents {
+        if agent.managed() && !jobs.iter().any(|job| job.job_id == agent.job_id) {
+            jobs.push(JobSummary {
+                job_id: agent.job_id.clone(),
+                state: "running".into(),
+                harness: agent.harness.clone(),
+                root_pid: Some(agent.root_pid),
+                captured: true,
+                ..Default::default()
+            });
+        }
+    }
+    jobs
+}
+
+fn capture_note_for_job(captured: bool) -> Option<CaptureNote> {
+    (!captured).then_some(CaptureNote::NotCaptured)
+}
+
+fn snapshot_filter(filter: AgentFilter) -> AgentFilter {
+    filter
+}
+
+fn sync_detail_summary(detail: &mut JobDetail, job: &JobSummary) -> bool {
+    if detail.job_id != job.job_id {
+        return false;
+    }
+    detail.state = job.state.clone();
+    detail.exit_code = job.exit_code;
+    detail.capture_note = capture_note_for_job(job.captured);
+    true
+}
+
+fn watch_target(agents: &[Agent], jobs: &[JobSummary], id: String) -> Option<(String, bool, bool)> {
+    if let Some(job) = jobs.iter().find(|job| job.job_id == id) {
+        Some((id, crate::job_detail::is_terminal(&job.state), job.captured))
+    } else if agents
+        .iter()
+        .any(|agent| agent.job_id == id && !agent.managed())
+    {
+        None
+    } else {
+        Some((id, false, true))
     }
 }
 
@@ -1013,6 +1256,7 @@ fn shortcut_action(shortcut: &str) -> Option<WorkbenchAction> {
 
 impl Render for Workbench {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let banner = self.error.clone().or(self.connection_error.clone());
         let total_memory: f64 = self.agents.iter().map(|a| a.total_memory_mb).sum();
         let total_processes: usize = self.agents.iter().map(|a| a.processes.len()).sum();
         let details = if let Some(form) = &self.form {
@@ -1023,6 +1267,16 @@ impl Render for Workbench {
             .find(|a| Some(&a.job_id) == self.selected.as_ref())
         {
             self.details(agent, cx).into_any_element()
+        } else if let Some(job) = self
+            .jobs
+            .iter()
+            .find(|j| Some(&j.job_id) == self.selected.as_ref())
+        {
+            div()
+                .flex_1()
+                .p_6()
+                .child(crate::job_detail::render(self.detail.as_ref(), &job.job_id))
+                .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -1122,7 +1376,7 @@ impl Render for Workbench {
                                     )),
                             ),
                     )
-                    .when(self.error.is_some() || self.notice.is_some(), |s| {
+                    .when(banner.is_some() || self.notice.is_some(), |s| {
                         s.child(
                             div()
                                 .px_5()
@@ -1138,14 +1392,13 @@ impl Render for Workbench {
                                         .flex_1()
                                         .min_w_0()
                                         .text_size(px(13.))
-                                        .text_color(color(if self.error.is_some() {
+                                        .text_color(color(if banner.is_some() {
                                             DANGER
                                         } else {
                                             ACCENT
                                         }))
                                         .child(
-                                            self.error
-                                                .clone()
+                                            banner.clone()
                                                 .or(self.notice.clone())
                                                 .unwrap_or_default(),
                                         ),
@@ -1155,7 +1408,7 @@ impl Render for Workbench {
                                     "Dismiss",
                                     false,
                                     |this, _, cx| {
-                                        this.error = None;
+                                        reduce_banner(&mut this.error, &mut this.connection_error, BannerEvent::Dismiss);
                                         this.notice = None;
                                         cx.notify();
                                     },
@@ -1183,7 +1436,9 @@ impl Render for Workbench {
                             .justify_between()
                             .text_size(px(11.))
                             .text_color(color(MUTED))
-                            .child(if self.connected() {
+                            .child(if self.poll_failed {
+                                "Disconnected from local manager  |  Showing the last successful snapshot"
+                            } else if self.connected() {
                                 "Connected to local manager  |  Updates every 2 seconds"
                             } else if self.last_success.is_some() {
                                 "Connection stale  |  Showing the last successful snapshot"
@@ -1216,11 +1471,14 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        NEW_AGENT_SHORTCUT, QUIT_SHORTCUT, REFRESH_SHORTCUT, WorkbenchAction, cancel_confirmation,
-        fallback_harnesses, filtered_agents, format_accel, keep_role_filter, matching_harnesses,
-        refreshed_selection, request_stop, shortcut_action, validate_launch_arguments,
+        AgentFilter, BannerEvent, NEW_AGENT_SHORTCUT, QUIT_SHORTCUT, REFRESH_SHORTCUT,
+        WorkbenchAction, cancel_confirmation, capture_note_for_job, fallback_harnesses,
+        filtered_agents, format_accel, matching_harnesses, merge_fleet_jobs, reduce_banner,
+        refreshed_selection, refreshed_selection_with_jobs, request_stop, shortcut_action,
+        snapshot_filter, sync_detail_summary, validate_launch_arguments, watch_target,
     };
-    use crate::model::{AcceleratorUsage, Agent, Process, ROLE_ORDER, role_label};
+    use crate::job_detail::CaptureNote;
+    use crate::model::{AcceleratorUsage, Agent, JobSummary, Process, ROLE_ORDER, role_label};
 
     fn agent(id: &str, harness: &str, branch: &str, pid: u32) -> Agent {
         Agent {
@@ -1249,13 +1507,19 @@ mod tests {
             agent("job-1", "codex", "feature/ui", 4101),
             agent("job-2", "claude", "main", 5202),
         ];
-        assert_eq!(filtered_agents(&agents, "codex", 0, None).len(), 1);
         assert_eq!(
-            filtered_agents(&agents, "FEATURE/UI", 0, None)[0].job_id,
+            filtered_agents(&agents, "codex", AgentFilter::AllAgents, None).len(),
+            1
+        );
+        assert_eq!(
+            filtered_agents(&agents, "FEATURE/UI", AgentFilter::AllAgents, None)[0].job_id,
             "job-1"
         );
-        assert_eq!(filtered_agents(&agents, "5202", 0, None)[0].job_id, "job-2");
-        assert!(filtered_agents(&agents, "missing", 0, None).is_empty());
+        assert_eq!(
+            filtered_agents(&agents, "5202", AgentFilter::AllAgents, None)[0].job_id,
+            "job-2"
+        );
+        assert!(filtered_agents(&agents, "missing", AgentFilter::AllAgents, None).is_empty());
     }
 
     #[test]
@@ -1282,24 +1546,14 @@ mod tests {
         let mut second = agent("job-2", "claude", "main", 200);
         second.role_counts.insert("agent".into(), 1);
         let agents = vec![first, second];
-        assert_eq!(filtered_agents(&agents, "", 0, Some("dev-server")).len(), 1);
         assert_eq!(
-            filtered_agents(&agents, "", 0, Some("dev-server"))[0].job_id,
+            filtered_agents(&agents, "", AgentFilter::AllAgents, Some("dev-server")).len(),
+            1
+        );
+        assert_eq!(
+            filtered_agents(&agents, "", AgentFilter::AllAgents, Some("dev-server"))[0].job_id,
             "job-1"
         );
-    }
-
-    #[test]
-    fn role_filter_is_cleared_when_snapshot_loses_the_role() {
-        let mut value = agent("job-1", "codex", "main", 100);
-        value.role_counts.insert("test-runner".into(), 1);
-        assert!(keep_role_filter(
-            std::slice::from_ref(&value),
-            Some("test-runner")
-        ));
-        value.role_counts.clear();
-        assert!(!keep_role_filter(&[value], Some("test-runner")));
-        assert!(keep_role_filter(&[], None));
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1342,6 +1596,137 @@ mod tests {
             Some(Some("job-1".into()))
         );
         assert_eq!(refreshed_selection(&[], Some("removed")), Some(None));
+    }
+
+    #[test]
+    fn fleet_job_merge_keeps_terminal_summaries_and_adds_live_trees_once() {
+        let agents = vec![agent("running", "codex", "main", 100)];
+        let jobs = vec![
+            JobSummary {
+                job_id: "lost".into(),
+                state: "lost".into(),
+                captured: true,
+                ..Default::default()
+            },
+            JobSummary {
+                job_id: "running".into(),
+                state: "starting".into(),
+                ..Default::default()
+            },
+        ];
+        let listed = merge_fleet_jobs(&agents, jobs);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["lost", "running"]
+        );
+        assert_eq!(listed[0].state, "lost");
+        assert_eq!(listed[1].state, "starting");
+        assert_eq!(
+            listed.iter().filter(|job| job.job_id == "running").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn selected_fleet_job_survives_disappearing_process_tree() {
+        let terminal = JobSummary {
+            job_id: "job-2".into(),
+            state: "lost".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            refreshed_selection_with_jobs(&[], &[terminal], Some("job-2")),
+            None
+        );
+        assert_eq!(
+            refreshed_selection_with_jobs(&[], &[], Some("job-2")),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn banner_event_sequences_keep_operator_error_and_clear_only_connection_error() {
+        let (mut operator, mut connection) = (None, None);
+        reduce_banner(
+            &mut operator,
+            &mut connection,
+            BannerEvent::OperatorError("launch failed"),
+        );
+        reduce_banner(&mut operator, &mut connection, BannerEvent::Snapshot);
+        assert_eq!(operator.as_deref(), Some("launch failed"));
+        reduce_banner(
+            &mut operator,
+            &mut connection,
+            BannerEvent::PollError("offline"),
+        );
+        reduce_banner(&mut operator, &mut connection, BannerEvent::Snapshot);
+        assert_eq!(operator.as_deref(), Some("launch failed"));
+        assert_eq!(connection, None);
+        reduce_banner(&mut operator, &mut connection, BannerEvent::DetailError);
+        assert_eq!(operator.as_deref(), Some("launch failed"));
+        reduce_banner(&mut operator, &mut connection, BannerEvent::Dismiss);
+        assert_eq!(operator, None);
+    }
+
+    #[test]
+    fn jobs_summary_update_checks_detail_id_and_capture_note_kind() {
+        let mut detail = crate::job_detail::JobDetail::new("job-a");
+        detail.state = "running".into();
+        let other = JobSummary {
+            job_id: "job-b".into(),
+            state: "lost".into(),
+            ..Default::default()
+        };
+        assert!(!sync_detail_summary(&mut detail, &other));
+        assert_eq!(detail.state, "running");
+        let selected = JobSummary {
+            job_id: "job-a".into(),
+            state: "failed".into(),
+            captured: false,
+            ..Default::default()
+        };
+        assert!(sync_detail_summary(&mut detail, &selected));
+        assert_eq!(detail.capture_note, Some(CaptureNote::NotCaptured));
+        assert_eq!(
+            CaptureNote::Discovered.message(),
+            "Not started through agtop; output is not captured."
+        );
+        assert_eq!(capture_note_for_job(false), Some(CaptureNote::NotCaptured));
+    }
+
+    #[test]
+    fn background_snapshot_preserves_the_current_filter() {
+        for filter in [
+            AgentFilter::Jobs,
+            AgentFilter::AllAgents,
+            AgentFilter::Managed,
+            AgentFilter::Discovered,
+        ] {
+            assert_eq!(snapshot_filter(filter), filter);
+        }
+    }
+
+    #[test]
+    fn discovered_processes_are_not_watched_as_fleet_jobs() {
+        let mut passive = agent("passive-claude-code-736929", "claude", "main", 736929);
+        passive.containment_mode = "passive-ppid".into();
+        assert_eq!(
+            watch_target(&[passive], &[], "passive-claude-code-736929".into()),
+            None
+        );
+        let job = JobSummary {
+            job_id: "done".into(),
+            state: "killed".into(),
+            captured: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            watch_target(&[], &[job], "done".into()),
+            Some(("done".into(), true, true))
+        );
     }
 
     #[test]

@@ -387,6 +387,29 @@ pub struct EventsPage {
     pub events: Vec<JobEvent>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobsPage {
+    #[serde(default)]
+    pub jobs: Vec<JobSummary>,
+    #[serde(default)]
+    pub next_after: Option<String>,
+}
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobSummary {
+    pub job_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub harness: String,
+    #[serde(default)]
+    pub root_pid: Option<u32>,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub captured: bool,
+}
+
 pub fn parse_arguments(text: &str) -> Result<Vec<String>, String> {
     if text.trim().is_empty() {
         return Ok(Vec::new());
