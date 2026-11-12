@@ -1,5 +1,7 @@
 use crate::job_detail::{advance_cursor, events_request, is_terminal, output_request};
-use crate::model::{Agent, EventsPage, Harness, KillResult, Launch, Lemonade, OutputPage};
+use crate::model::{
+    Agent, EventsPage, Harness, JobSummary, JobsPage, KillResult, Launch, Lemonade, OutputPage,
+};
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use std::{
@@ -167,6 +169,7 @@ pub enum Command {
 }
 pub enum Event {
     Snapshot(Vec<Agent>),
+    Jobs(Vec<JobSummary>),
     Harnesses(Vec<Harness>),
     Lemonade(Lemonade),
     Error(String),
@@ -253,6 +256,9 @@ pub fn start(config: Config) -> (Sender<Command>, Receiver<Event>) {
             }
             match client.get("/v1/agents") {
                 Ok(agents) => {
+                    if let Ok(page) = client.get::<JobsPage>("/v1/jobs?limit=500") {
+                        let _ = events.send(Event::Jobs(page.jobs));
+                    }
                     if events.send(Event::Snapshot(agents)).is_err() {
                         break;
                     }

@@ -2,7 +2,7 @@ use crate::{
     client::{Command, Config, Event},
     input::TextInput,
     job_detail::JobDetail,
-    model::{Agent, Harness, Launch, Lemonade, parse_arguments},
+    model::{Agent, Harness, JobSummary, Launch, Lemonade, parse_arguments},
     theme::*,
 };
 use gpui::{div, prelude::*, *};
@@ -45,6 +45,7 @@ struct LaunchForm {
 
 pub struct Workbench {
     agents: Vec<Agent>,
+    jobs: Vec<JobSummary>,
     harnesses: Vec<Harness>,
     selected: Option<String>,
     filter: u8,
@@ -84,6 +85,7 @@ impl Workbench {
         });
         Self {
             agents: vec![],
+            jobs: vec![],
             harnesses: fallback_harnesses(),
             selected: None,
             filter: 0,
@@ -117,6 +119,13 @@ impl Workbench {
                             .then_with(|| a.root_pid.cmp(&b.root_pid))
                     });
                     if let Some(selected) = refreshed_selection(&agents, self.selected.as_deref()) {
+                        let current = self.selected.as_deref();
+                        if current.is_some_and(|id| self.jobs.iter().any(|job| job.job_id == id)) {
+                            self.agents = agents;
+                            self.last_success = Some(Instant::now());
+                            self.error = None;
+                            continue;
+                        }
                         self.selected = selected;
                         self.confirm = None;
                     }
@@ -129,6 +138,11 @@ impl Workbench {
                         self.role_filter = None;
                     }
                     self.last_success = Some(Instant::now());
+                    self.error = None;
+                    self.error = None;
+                }
+                Event::Jobs(jobs) => {
+                    self.jobs = jobs;
                 }
                 Event::Harnesses(catalog) => {
                     if !catalog.is_empty() {
@@ -333,6 +347,21 @@ impl Workbench {
                     .child("agtop"),
             )
             .child(Self::caption("Agent process manager").mb_6())
+            .child(
+                Self::action(
+                    "nav-jobs",
+                    format!("Jobs   {}", self.jobs.len()),
+                    self.filter == 3,
+                    |this, _, cx| {
+                        this.filter = 3;
+                        this.role_filter = None;
+                        this.form = None;
+                        cx.notify();
+                    },
+                    cx,
+                )
+                .justify_start(),
+            )
             .children(
                 [
                     ("All agents", self.agents.len()),
@@ -483,6 +512,29 @@ impl Workbench {
             )
     }
     fn list(&self, cx: &Context<Self>) -> Div {
+        if self.filter == 3 {
+            return div().w(px(340.)).flex_shrink_0().h_full().children(
+                self.jobs.iter().enumerate().map(|(i, j)| {
+                    let id = j.job_id.clone();
+                    let selected = self.selected.as_deref() == Some(&id);
+                    div()
+                        .id(("fleet-job", i))
+                        .p_4()
+                        .border_b_1()
+                        .border_color(color(if selected { ACCENT } else { LINE }))
+                        .bg(color(if selected { RAISED } else { BACKGROUND }))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.selected = Some(id.clone());
+                            this.filter = 3;
+                            this.form = None;
+                            this.watch_selected();
+                            cx.notify();
+                        }))
+                        .child(format!("{} · {}", j.job_id, j.state))
+                }),
+            );
+        }
         let query = self.search.read(cx).content.as_ref();
         let agents = filtered_agents(
             &self.agents,
@@ -1023,6 +1075,16 @@ impl Render for Workbench {
             .find(|a| Some(&a.job_id) == self.selected.as_ref())
         {
             self.details(agent, cx).into_any_element()
+        } else if let Some(job) = self
+            .jobs
+            .iter()
+            .find(|j| Some(&j.job_id) == self.selected.as_ref())
+        {
+            div()
+                .flex_1()
+                .p_6()
+                .child(crate::job_detail::render(self.detail.as_ref(), &job.job_id))
+                .into_any_element()
         } else {
             div()
                 .flex_1()
