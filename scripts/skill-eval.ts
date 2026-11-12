@@ -39,7 +39,7 @@ function args(): { agent: "claude" | "codex" | "both"; scenarios?: string[]; dry
 }
 
 export function makePrompt(scenario: Scenario, withSkill: boolean, skillText: string): string {
-  const tools = scenario.tools ?? ["agtop_run", "agtop_wait", "agtop_status", "agtop_kill", "agtop_cleanup", "agtop_list", "agtop_harnesses", "agtop_lemonade", "shell"];
+  const tools = scenario.tools ?? ["agtop_run", "agtop_wait", "agtop_status", "agtop_output", "agtop_events", "agtop_kill", "agtop_cleanup", "agtop_list", "agtop_harnesses", "agtop_lemonade", "shell"];
   return `You are planning how to handle a user task. PLAN only; do not execute anything.\nAvailable tools: ${tools.join(", ")}. Shell calls use args {"command":"..."}.\n${withSkill ? `Read this skill and follow it:\n--- SKILL.md ---\n${skillText}\n--- end skill ---\n` : ""}${scenario.priorCalls?.length ? `Prior tool calls already happened (transcript):\n${JSON.stringify(scenario.priorCalls, null, 2)}\n` : ""}User task: ${scenario.prompt}\nReply with ONLY a JSON object: {"calls":[{"tool":"...","args":{...}}], "message":"what you'd tell the user"}.`;
 }
 
