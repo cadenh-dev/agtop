@@ -209,6 +209,26 @@ describe("negative and ambiguous cases", () => {
     reject({ name: "ssh-agent", cmdline: "ssh-agent -s" });
   });
 
+  test("Amp matches npm package entry points, not the CubeCoders AMP panel", () => {
+    reject({
+      name: "AMP.exe",
+      cmdline: '"C:\\Program Files\\CubeCoders Limited\\AMP\\AMP.exe"',
+      argv: ["C:\\Program Files\\CubeCoders Limited\\AMP\\AMP.exe"],
+    });
+    for (const packagePath of ["@sourcegraph/amp", "@ampcode/cli"]) {
+      expect(detectHarness({
+        name: "node.exe",
+        cmdline: `node.exe C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\${packagePath}\\bin\\amp.js`,
+        argv: ["node.exe", `C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\${packagePath}\\bin\\amp.js`],
+      })).toBe("amp");
+      expect(detectHarness({
+        name: "node",
+        cmdline: `node /usr/lib/node_modules/${packagePath}/bin/amp.js`,
+        argv: ["node", `/usr/lib/node_modules/${packagePath}/bin/amp.js`],
+      })).toBe("amp");
+    }
+  });
+
   test("empty or odd argv", () => {
     reject({ name: "", cmdline: "" });
     reject({ name: "node", cmdline: "node" });

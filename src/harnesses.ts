@@ -98,7 +98,10 @@ export const HARNESS_DEFINITIONS: readonly HarnessDefinition[] = [
     id: "amp",
     label: "Sourcegraph Amp",
     kind: "agent",
-    rules: [{ binaries: ["amp"] }, { paths: ["@ampcode/cli", "@sourcegraph/amp"] }],
+    rules: [
+      { binaries: ["amp"], excludePaths: ["cubecoders", "ampdatastore", "/amp/"] },
+      { paths: ["@ampcode/cli", "@sourcegraph/amp"] },
+    ],
   },
   {
     id: "crush",
