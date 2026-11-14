@@ -43,8 +43,14 @@
       ]
     },
     {
-      "type": "messageMatches",
-      "regex": "(?=[\\s\\S]*(?:GPU|NPU|accelerator|contention|another job|already in use))(?=[\\s\\S]*(?:wait|hold|defer|ask|would you like|should I|warning|warn|may slow|compete))[\\s\\S]+"
+      "type": "anyOf",
+      "rules": [
+        {
+          "type": "messageMatches",
+          "regex": "(?=[\\s\\S]*(?:GPU|NPU|accelerator|contention|another job|already in use))(?=[\\s\\S]*(?:wait|hold|defer|ask|would you like|should I|warning|warn|may slow|compete))[\\s\\S]+"
+        },
+        { "type": "mustCall", "tool": "agtop_run", "argsMatch": { "args": "bench:model", "resources": "\"gpu\":\\s*true" } }
+      ]
     }
   ]
 }
