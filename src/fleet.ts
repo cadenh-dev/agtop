@@ -50,8 +50,13 @@ export interface FleetOpenOptions {
   stalenessRefreshMs?: number;
   /** Test seam; how often an unchanged set of unshadowed v1 records is rescanned. */
   stalenessIdleRescanMs?: number;
-  /** Test seam; how long a CLI open waits for the first staleness scan. */
-  cliFirstScanWaitMs?: number;
+  /**
+   * Wait (at most firstScanWaitMs, default 5 s) for the first staleness scan before returning, so a
+   * one-shot listing does not show dead v1 records as running. Only listing commands set this.
+   */
+  waitForFirstScan?: boolean;
+  /** Test seam; upper bound for waitForFirstScan. */
+  firstScanWaitMs?: number;
   guard?: { accelerators?: () => AcceleratorSnapshot | undefined; freeMemoryMb?: () => number; now?: () => number };
 }
 
@@ -145,13 +150,13 @@ interface ServiceDeps {
   stalenessIdleRescanMs: number;
 }
 
-/** Upper bound on how long a CLI open waits for its first staleness scan. */
-const CLI_FIRST_SCAN_WAIT_MS = 5_000;
-/** Resolves when `promise` settles or after `ms`, whichever is first; the timer never keeps the process alive. */
-async function waitAtMost(promise: Promise<void>, ms: number): Promise<void> {
+/** Upper bound on how long an open with waitForFirstScan waits for the first staleness scan. */
+const FIRST_SCAN_WAIT_MS = 5_000;
+/** True when `promise` settled within `ms`, false on timeout. The timer is ref'd so the wait is binding. */
+async function waitAtMost(promise: Promise<void>, ms: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); timer.unref(); });
-  try { await Promise.race([promise, timeout]); } finally { if (timer !== undefined) clearTimeout(timer); }
+  const timeout = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), ms); });
+  try { return await Promise.race([promise.then(() => true as const), timeout]); } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 /** While the set of unshadowed v1 records is unchanged, the staleness scan repeats at most this often. */
 const STALENESS_IDLE_RESCAN_MS = 300_000;
@@ -182,10 +187,11 @@ export class FleetService {
       scheduler.start();
       const service = new FleetService({ surface: options.surface, session, store, index, leases, guard, runtime, scheduler, trees, policy, lifecycle, stalenessScan: options.stalenessScan ?? ((signal) => processSnapshotAsync(process.platform, signal)), stalenessRefreshMs: options.stalenessRefreshMs ?? 15_000, stalenessIdleRescanMs: options.stalenessIdleRescanMs ?? (process.platform === "win32" ? STALENESS_IDLE_RESCAN_MS : 0) });
       const firstScan = service.startStalenessRefresher((view) => { stalenessView = view; });
-      // A one-shot CLI command lists right away and exits; without the first view it would show
-      // leftover v1 records of dead jobs as running. Wait for that scan (only when such records
-      // exist; at most CLI_FIRST_SCAN_WAIT_MS, about one PowerShell scan on Windows).
-      if (options.surface === "cli") await waitAtMost(firstScan, options.cliFirstScanWaitMs ?? CLI_FIRST_SCAN_WAIT_MS);
+      // A one-shot listing prints right away and exits; without the first view it would show leftover
+      // v1 records of dead jobs as running. The scan only runs when such records exist.
+      if (options.waitForFirstScan && !(await waitAtMost(firstScan, options.firstScanWaitMs ?? FIRST_SCAN_WAIT_MS))) {
+        process.stderr.write("agtop: the process scan is still running; jobs whose process already ended may still show as running.\n");
+      }
       return service;
     } catch (error) {
       scheduler.stop(); // a failed open leaves no timer behind

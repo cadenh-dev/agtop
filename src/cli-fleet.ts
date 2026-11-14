@@ -65,8 +65,9 @@ const printJson = (value: unknown): void => { printLine(JSON.stringify(value, nu
 const oneLine = (text: string): string => text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 
 /** Opens the fleet as the CLI admin and closes it on every path, success or error. */
-async function withFleet<T>(fn: (fleet: FleetService) => T | Promise<T>): Promise<T> {
-  const fleet = await FleetService.open({ surface: "cli" });
+async function withFleet<T>(fn: (fleet: FleetService) => T | Promise<T>, listing = false): Promise<T> {
+  // Listing commands wait for the first process scan so dead v1 jobs are not shown as running.
+  const fleet = await FleetService.open({ surface: "cli", waitForFirstScan: listing });
   try { return await fn(fleet); } finally { await fleet.close(); }
 }
 
@@ -84,7 +85,7 @@ async function jobs(args: string[]): Promise<void> {
   await withFleet((fleet) => {
     const result = fleet.list(states === undefined ? {} : { states: states as JobSummaryV2["state"][] }, ADMIN);
     if (has(flags, "--json")) printJson(result); else printLine(jobLines(result.jobs));
-  });
+   }, true);
 }
 
 const writePage = (page: OutputPage, asJson: boolean): void => { if (asJson) printJson(page); else process.stdout.write(renderOutputText(page)); };
@@ -167,7 +168,7 @@ async function queue(args: string[]): Promise<void> {
     const policy = view.policy;
     lines.push(`Policy: maxRunning ${policy.maxRunning}  perPeer ${policy.maxRunningPerPeer}  perHarness ${policy.maxRunningPerHarness}  maxQueued ${policy.maxQueued}`);
     printLine(lines.join("\n"));
-  });
+  }, true); // cap counts include migrated v1 jobs
 }
 
 async function leases(args: string[]): Promise<void> {
