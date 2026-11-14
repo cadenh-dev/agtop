@@ -1017,7 +1017,7 @@ export class FleetService {
 }
 ```
 
-FleetService owns an unref'd process staleness refresher that ticks every 15 seconds. It scans asynchronously, only while unshadowed v1 records exist, never from inside the fleet lock, and permits only one scan in flight. On Windows, where a scan is a PowerShell process, it rescans an unchanged set of unshadowed v1 IDs at most every 5 minutes; elsewhere every tick. A failed scan keeps the prior view and is retried on the next tick; a fresh view refreshes the index and ticks the scheduler. `close()` stops the refresher and aborts an in-flight scan.
+FleetService owns an unref'd process staleness refresher that ticks every 15 seconds. It scans asynchronously, only while unshadowed v1 records exist, never from inside the fleet lock, and permits only one scan in flight. On Windows, where a scan is a PowerShell process, it rescans an unchanged set of unshadowed v1 IDs at most every 5 minutes; elsewhere every tick. A failed scan keeps the prior view and is retried on the next tick; a fresh view refreshes the index and ticks the scheduler. `close()` stops the refresher and aborts an in-flight scan. `FleetService.open({ waitForFirstScan: true })` (used by `agtop jobs` and `agtop queue`) waits for the first scan, at most 5 s, before returning, and writes one stderr line if it gives up; the scan is skipped, and the open does not wait, when no unshadowed v1 records exist.
 
 Access rules (`ownership.ts`):
 
