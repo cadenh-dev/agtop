@@ -32,6 +32,7 @@ The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `
 - `run` is immediate by default and is never queued. Passing `priority`, `dependsOn`, `leasePorts`, or `resources` queues the job behind admission rules.
 - A queued `run` result has `state: "queued"`, `pid` absent, and `queue: { position, blockedBy }`. `wait` on it times out with `state: "queued"`; `kill` cancels it.
 - Use `leasePorts` when the job will bind ports, `resources` for GPU, NPU, or memory, and `dependsOn` for jobs that must succeed first.
+  For example `agtop_run { "command": "bun", "args": ["run", "bench"], "resources": { "gpu": true } }` waits for a free GPU, and `"leasePorts": [3001]` reserves a port; `gpu` and `npu` are booleans, `memoryMb` a number.
 - Output is readable at `agtop://jobs/{jobId}/output/{stream}` and the lifecycle timeline at `agtop://jobs/{jobId}/events`; each page's `nextUri` pages forward.
 
 ## Multi-agent awareness
