@@ -49,7 +49,7 @@ The MCP server exposes short tool names. OpenCode exposes them as `agtop_run`, `
 - `kill` only accepts jobs created by this MCP session. Do not try to kill other agents' live jobs; use your own orchestrator for that. MCP `cleanup` may remove records only when agtop proves the supervisor and all contained members are gone.
 - Call `agtop_cleanup` before finishing any task that started helpers, even if you expect them to have exited.
 - If `wait` times out, the job is still running. Inspect it and decide whether to kill it; do not assume it finished.
-- Run commands that finish within the turn and whose output you need (tests, one-off builds, linters) in the normal shell, not with `agtop_run` + `agtop_wait` + `agtop_output`. `agtop_output` is for checking on long-lived jobs such as dev servers, watchers, and subagents.
+- Run commands that finish within the turn and whose output you need (tests, one-off builds, linters) in the normal shell, not with `agtop_run` + `agtop_wait` + `agtop_output`. `agtop_output` is for checking on long-lived jobs such as dev servers, watchers, and subagents. Running the tests in the shell does not change cleanup: after the tests, still stop every helper you started (`agtop_cleanup`, or kill the PIDs you tracked when agtop is unavailable).
 - agtop is lifecycle containment, not a security sandbox. It does not restrict filesystem, network, memory, or privileges.
 - If the agtop tools are unavailable, fall back to the normal shell, but explicitly track and stop the PIDs you start.
 
