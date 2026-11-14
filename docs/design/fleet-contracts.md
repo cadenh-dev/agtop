@@ -561,7 +561,7 @@ export class JobIndex {
 
 Folding: start from `events[0].record`; for each later `StateEvent` set `state`, `stateReason = reason`, and shallow-assign `patch`; set `lastSeq` to the highest seq seen in `events.jsonl` unless a patch supplied a higher one. `spawn`, `exit`, `lease` and `policy` events do not change the record (their data reaches the record through the patch on the neighboring state event).
 
-`RUNNING_STATES` and `TERMINAL_STATES` come from `src/job-state.ts` (section 14). `readV1` defaults to `readJobs` from `src/registry.ts`. v1 jobs whose ID has no fleet directory appear via `migrateV1Record`. By default every such record is shown. When `staleness` supplies a last-known view, the index filters a record only when its `createdAt` predates `takenAtMs` and the record is proven stale from that view. Unknown views keep records visible. `JobIndex` never scans the OS process table; the injected callback only reads FleetService's cached view.
+`RUNNING_STATES` and `TERMINAL_STATES` come from `src/job-state.ts` (section 14). `readV1` defaults to `readJobs` from `src/registry.ts`. v1 jobs whose ID has no fleet directory appear via `migrateV1Record`. By default every such record is shown. When `staleness` supplies a last-known view, the index filters a record only when both its `createdAt` and its record file's write time predate `takenAtMs` (the file is written after the spawn; an unreadable file falls back to `createdAt`) and the record is proven stale from that view. Unknown views keep records visible. `JobIndex` never scans the OS process table; the injected callback only reads FleetService's cached view.
 
 ## 6. Capture modules
 
@@ -1017,7 +1017,7 @@ export class FleetService {
 }
 ```
 
-FleetService owns an unref'd 15-second process staleness refresher. It scans asynchronously, only while unshadowed v1 records exist, never from inside the fleet lock, and permits only one scan in flight. A failed scan keeps the prior view; a fresh view refreshes the index and ticks the scheduler. `close()` stops the refresher.
+FleetService owns an unref'd process staleness refresher that ticks every 15 seconds. It scans asynchronously, only while unshadowed v1 records exist, never from inside the fleet lock, and permits only one scan in flight. On Windows, where a scan is a PowerShell process, it rescans an unchanged set of unshadowed v1 IDs at most every 5 minutes; elsewhere every tick. A failed scan keeps the prior view and is retried on the next tick; a fresh view refreshes the index and ticks the scheduler. `close()` stops the refresher and aborts an in-flight scan.
 
 Access rules (`ownership.ts`):
 

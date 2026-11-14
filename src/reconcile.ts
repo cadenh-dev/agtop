@@ -132,8 +132,14 @@ function retentionHours(): number {
 function restoreAside(aside: string, companion: string): void {
   try {
     if (!fs.existsSync(aside)) return;
-    if (!fs.existsSync(companion)) { fs.renameSync(aside, companion); return; }
-    fs.rmSync(aside, { force: true }); // the newer record at the path wins; the aside copy is the stale one
+    try { fs.linkSync(aside, companion); } // fails with EEXIST if a newer record holds the path
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "ENOSYS") {
+        if (!fs.existsSync(companion)) { fs.renameSync(aside, companion); return; } // no hard links (FAT, some SMB)
+      } else if (code !== "EEXIST") throw error;
+    }
+    fs.rmSync(aside, { force: true }); // linked back, or the newer record at the path wins
   } catch { /* Leave the aside file; readJobs ignores names that do not end in .json. */ }
 }
 function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: number, rename: typeof fs.renameSync = fs.renameSync): string[] {

@@ -48,6 +48,8 @@ export interface FleetOpenOptions {
   stalenessScan?: (signal: AbortSignal) => Promise<ProcessIdentity[]>;
   /** Test seam; production keeps the 15-second refresh cadence. */
   stalenessRefreshMs?: number;
+  /** Test seam; how often an unchanged set of unshadowed v1 records is rescanned. */
+  stalenessIdleRescanMs?: number;
   guard?: { accelerators?: () => AcceleratorSnapshot | undefined; freeMemoryMb?: () => number; now?: () => number };
 }
 
@@ -138,6 +140,7 @@ interface ServiceDeps {
   policy: { current: AdmissionPolicy }; lifecycle: { closed: boolean };
   stalenessScan: (signal: AbortSignal) => Promise<ProcessIdentity[]>;
   stalenessRefreshMs: number;
+  stalenessIdleRescanMs: number;
 }
 
 /** While the set of unshadowed v1 records is unchanged, the staleness scan repeats at most this often. */
@@ -167,7 +170,7 @@ export class FleetService {
     scheduler = new Scheduler({ runtime, index, leases, guard, policy: () => policy.current, listeners });
     try {
       scheduler.start();
-      const service = new FleetService({ surface: options.surface, session, store, index, leases, guard, runtime, scheduler, trees, policy, lifecycle, stalenessScan: options.stalenessScan ?? ((signal) => processSnapshotAsync(process.platform, signal)), stalenessRefreshMs: options.stalenessRefreshMs ?? 15_000 });
+      const service = new FleetService({ surface: options.surface, session, store, index, leases, guard, runtime, scheduler, trees, policy, lifecycle, stalenessScan: options.stalenessScan ?? ((signal) => processSnapshotAsync(process.platform, signal)), stalenessRefreshMs: options.stalenessRefreshMs ?? 15_000, stalenessIdleRescanMs: options.stalenessIdleRescanMs ?? (process.platform === "win32" ? STALENESS_IDLE_RESCAN_MS : 0) });
       service.startStalenessRefresher((view) => { stalenessView = view; });
       return service;
     } catch (error) {
@@ -188,12 +191,13 @@ export class FleetService {
 
   private startStalenessRefresher(setView: (view: { takenAtMs: number; processes: ProcessIdentity[] }) => void): void {
     // A full scan (PowerShell on Windows) is only worth repeating when the v1 records changed;
-    // otherwise rescan at most every STALENESS_IDLE_RESCAN_MS so a later crash is still noticed.
+    // on Windows rescan at most every STALENESS_IDLE_RESCAN_MS so a later crash is still noticed;
+    // elsewhere the scan is a cheap /proc or libproc walk and keeps the normal cadence.
     let lastKey = "", lastScanMs = 0;
     const scan = async (): Promise<void> => {
       if (this.deps.lifecycle.closed || this.stalenessScanInFlight) return;
       const key = this.deps.index.unshadowedV1Ids().join("\n");
-      if (key === "" || (key === lastKey && Date.now() - lastScanMs < STALENESS_IDLE_RESCAN_MS)) return;
+      if (key === "" || (key === lastKey && Date.now() - lastScanMs < this.deps.stalenessIdleRescanMs)) return;
       this.stalenessScanInFlight = true;
       const takenAtMs = Date.now();
       try {
@@ -206,9 +210,10 @@ export class FleetService {
       } catch { /* A failed scan preserves the last-known view. */ }
       finally { this.stalenessScanInFlight = false; }
     };
-    this.stalenessTimer = setInterval(() => { void scan(); }, this.deps.stalenessRefreshMs);
+    const run = (): void => { scan().catch(() => undefined); }; // e.g. EACCES listing the state dir
+    this.stalenessTimer = setInterval(run, this.deps.stalenessRefreshMs);
     this.stalenessTimer.unref();
-    void scan();
+    run();
   }
 
   /** Validates, records and either starts the job at once or durably queues it (contracts 8.7). */

@@ -34,7 +34,7 @@ const admin: Caller = { kind: "admin" };
 const asSession = (service: FleetService, peer = "agent-1"): Caller => ({ kind: "session", session: service.session, peer });
 const codeOf = (fn: () => unknown): string | undefined => { try { fn(); return undefined; } catch (error) { return error instanceof FleetError ? error.code : String(error); } };
 
-async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity, refresher?: { scan: (signal: AbortSignal) => Promise<ProcessIdentity[]>; intervalMs?: number }): Promise<FleetService> {
+async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity, refresher?: { scan: (signal: AbortSignal) => Promise<ProcessIdentity[]>; intervalMs?: number; idleMs?: number }): Promise<FleetService> {
   const spawn = (async (options: SpawnAgentOptions) => {
     let finish!: (code: number) => void;
     const exited = new Promise<number>((resolve) => { finish = resolve; });
@@ -55,7 +55,7 @@ async function openFleet(surface: FleetSurface = "library", session?: SessionIde
   };
   const snapshot = (): Array<{ pid: number; startTime: string }> => [{ pid: process.pid, startTime: selfSupervisor("library").startTime }];
   const service = await FleetService.open({ surface, ...(session === undefined ? {} : { session }), spawn, capture,
-    ...(refresher === undefined ? {} : { stalenessScan: refresher.scan, stalenessRefreshMs: refresher.intervalMs }),
+    ...(refresher === undefined ? {} : { stalenessScan: refresher.scan, stalenessRefreshMs: refresher.intervalMs, ...(refresher.idleMs === undefined ? {} : { stalenessIdleRescanMs: refresher.idleMs }) }),
     reconcile: { snapshot }, guard: { accelerators: () => undefined, freeMemoryMb: () => 100_000 } });
   services.push(service);
   return service;
@@ -125,7 +125,7 @@ test("staleness refresher keeps the last view on failure, scans once per unchang
   fs.utimesSync(path.join(root, "gone-v1.json"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
   let calls = 0, release!: () => void, aborted = false;
   const hold = new Promise<void>((resolve) => { release = resolve; });
-  const service = await openFleet("library", identity("backoff"), { intervalMs: 5, scan: async (signal: AbortSignal) => {
+  const service = await openFleet("library", identity("backoff"), { intervalMs: 5, idleMs: 60_000, scan: async (signal: AbortSignal) => {
     calls++;
     if (calls === 1) return [];
     signal.addEventListener("abort", () => { aborted = true; });
@@ -140,8 +140,6 @@ test("staleness refresher keeps the last view on failure, scans once per unchang
   expect(calls).toBe(2); // the set changed: one more scan, which is still in flight
   release(); await new Promise((resolve) => setTimeout(resolve, 10));
   expect(codeOf(() => service.get("gone-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND"); // the failed scan kept the last view
-  const pending = new Promise<void>((resolve) => { release = resolve; });
-  void pending;
   await service.close();
   expect(aborted).toBe(true);
 });

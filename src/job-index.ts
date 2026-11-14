@@ -209,7 +209,6 @@ export class JobIndex {
       this.v1.set(record.jobId, migrateV1Record(record));
     }
   }
-  hasUnshadowedV1Records(): boolean { return this.unshadowedV1Ids().length > 0; }
   /** IDs of v1 records without a fleet directory, sorted; lets the refresher skip unchanged sets. */
   unshadowedV1Ids(): string[] { return this.readV1().filter((record) => !this.fleet.has(record.jobId)).map((record) => record.jobId).sort(); }
 }
