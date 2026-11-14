@@ -13,6 +13,10 @@ import { DEFAULT_ADMISSION_POLICY } from "../src/policy.js";
 import { withFleetLock } from "../src/reconcile.js";
 import { writeJob, type ProcessIdentity } from "../src/registry.js";
 import type { CaptureProvider, FleetSurface, JobRecord, ManagedAgent, SpawnAgentOptions, StateEvent } from "../src/types.js";
+// isStaleJob only judges the running platform's containment mode, so fake leftover records use it;
+// on Windows a Job Object that does not exist counts as gone (OpenJobObject: ERROR_FILE_NOT_FOUND).
+const ghostMode = (process.platform === "win32" ? { mode: "win32-job-object", jobName: "agtop-test-missing-job" }
+  : { mode: process.platform === "darwin" ? "darwin-env-pgid" : "linux-env-pgid" }) as Pick<JobRecord, "mode" | "jobName">;
 
 let root = "", previousStateDir: string | undefined;
 const services: FleetService[] = [];
@@ -92,7 +96,7 @@ test("staleness refresher runs only for unshadowed v1 records, outside the lock,
   const service = await openFleet("library", identity("refresh"), { scan: async () => { calls++; expect(fs.existsSync(path.join(root, "fleet", "lock"))).toBe(false); return []; }, intervalMs: 10 });
   await new Promise((resolve) => setTimeout(resolve, 30));
   expect(calls).toBe(0);
-  writeJob({ version: 1, jobId: "ghost", rootPid: 99991, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  writeJob({ version: 1, jobId: "ghost", rootPid: 99991, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", ...ghostMode, createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
   await new Promise((resolve) => setTimeout(resolve, 30));
   expect(calls).toBeGreaterThan(0);
   await service.close();
@@ -102,7 +106,7 @@ test("staleness refresher runs only for unshadowed v1 records, outside the lock,
 });
 
 test("a v1 job created after the last view occupies maxRunning until a later view proves it stale", async () => {
-  const stale = { version: 1 as const, jobId: "old-v1", rootPid: 99990, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 120_000).toISOString() };
+  const stale = { version: 1 as const, jobId: "old-v1", rootPid: 99990, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", ...ghostMode, createdAt: new Date(Date.now() - 120_000).toISOString() };
   writeJob(stale as JobRecord);
   let scans = 0, first!: () => void;
   const firstScan = new Promise<void>((resolve) => { first = resolve; });
@@ -121,7 +125,7 @@ test("a v1 job created after the last view occupies maxRunning until a later vie
   expect(service.get(queued.jobId, asSession(service)).job.state).toBe("running");
 });
 test("staleness refresher keeps the last view on failure, scans once per unchanged set, and aborts on close", async () => {
-  writeJob({ version: 1, jobId: "gone-v1", rootPid: 99_988, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  writeJob({ version: 1, jobId: "gone-v1", rootPid: 99_988, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", ...ghostMode, createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
   fs.utimesSync(path.join(root, "gone-v1.json"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
   let calls = 0, release!: () => void, aborted = false;
   const hold = new Promise<void>((resolve) => { release = resolve; });
@@ -135,7 +139,7 @@ test("staleness refresher keeps the last view on failure, scans once per unchang
   await new Promise((resolve) => setTimeout(resolve, 40));
   expect(calls).toBe(1); // the set of v1 records did not change, so no rescan
   expect(codeOf(() => service.get("gone-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND");
-  writeJob({ version: 1, jobId: "another-v1", rootPid: 99_987, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  writeJob({ version: 1, jobId: "another-v1", rootPid: 99_987, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", ...ghostMode, createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
   await new Promise((resolve) => setTimeout(resolve, 40));
   expect(calls).toBe(2); // the set changed: one more scan, which is still in flight
   release(); await new Promise((resolve) => setTimeout(resolve, 10));

@@ -9,6 +9,10 @@ import { JobIndex } from "../src/job-index.js";
 import { RETENTION_HOURS, RETENTION_MAX_JOBS, reconcileFleet, supervisorAlive, withFleetLock } from "../src/reconcile.js";
 import { processSnapshot, writeJob, type ProcessIdentity } from "../src/registry.js";
 import type { JobEvent, JobRecord, JobRecordV2, KillResult, StateEvent, SupervisorIdentity } from "../src/types.js";
+// isStaleJob only judges the running platform's containment mode, so fake leftover records use it;
+// on Windows a Job Object that does not exist counts as gone (OpenJobObject: ERROR_FILE_NOT_FOUND).
+const ghostMode = (process.platform === "win32" ? { mode: "win32-job-object", jobName: "agtop-test-missing-job" }
+  : { mode: process.platform === "darwin" ? "darwin-env-pgid" : "linux-env-pgid" }) as Pick<JobRecord, "mode" | "jobName">;
 
 let root = "", previousStateDir: string | undefined;
 beforeEach(() => {
@@ -228,7 +232,7 @@ test("retention keeps a v1 record replaced after read and leaves null or unparsa
   terminal("replaced", { mode: "passive-ppid", rootPid: 900, startTime: "9" });
   terminal("null-containment", null);
   terminal("unparsable", { mode: "passive-ppid", rootPid: 900, startTime: "9" });
-  const staleCompanion = { version: 1, rootPid: 900, startTime: "9", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: ago(73) };
+  const staleCompanion = { version: 1, rootPid: 900, startTime: "9", harness: "custom", peer: "tester", cwd: root, backend: "unknown", ...ghostMode, createdAt: ago(73) };
   fs.writeFileSync(path.join(root, "replaced.json"), JSON.stringify({ ...staleCompanion, jobId: "replaced" }));
   fs.writeFileSync(path.join(root, "null-containment.json"), JSON.stringify({ ...staleCompanion, jobId: "null-containment" }));
   fs.writeFileSync(path.join(root, "unparsable.json"), "{");

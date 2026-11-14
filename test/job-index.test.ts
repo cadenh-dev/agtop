@@ -4,6 +4,10 @@ import { EventStore, encodeFrame } from "../src/event-store.js";
 import { foldEvents, JobIndex, migrateV1Record, toSummary, isStaleV1Record } from "../src/job-index.js";
 import { readJobs, writeJob, type ProcessIdentity } from "../src/registry.js";
 import type { JobEvent, JobRecord, JobRecordPatch, JobRecordV2 } from "../src/types.js";
+// isStaleJob only judges the running platform's containment mode, so fake leftover records use it;
+// on Windows a Job Object that does not exist counts as gone (OpenJobObject: ERROR_FILE_NOT_FOUND).
+const ghostMode = (process.platform === "win32" ? { mode: "win32-job-object", jobName: "agtop-test-missing-job" }
+  : { mode: process.platform === "darwin" ? "darwin-env-pgid" : "linux-env-pgid" }) as Pick<JobRecord, "mode" | "jobName">;
 
 let root: string, store: EventStore;
 beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), "agtop-job-index-")); store = new EventStore({ root }); });
@@ -213,15 +217,15 @@ test("uses the default state directory and keeps readJobs() to v1 records", () =
 });
 
 test("JobIndex filters only v1 records older than an injected view and never scans", () => {
-  const live = v1Record("live-v1", { mode: "linux-env-pgid" });
-  const stale = v1Record("stale-v1", { jobId: "stale-v1", rootPid: 9000, mode: "linux-env-pgid" });
+  const live = v1Record("live-v1", { ...ghostMode });
+  const stale = v1Record("stale-v1", { jobId: "stale-v1", rootPid: 9000, ...ghostMode });
   let viewCalls = 0;
   const view = { takenAtMs: Date.parse("2026-01-03T00:00:00Z"), processes: liveV1Snapshot };
   const index = new JobIndex(store, { readV1: () => [live, stale], staleness: () => view });
   index.rebuild();
   expect(index.list().map((job) => job.jobId)).toEqual(["live-v1"]);
   expect(index.runningCounts().total).toBe(1);
-  const newRecord = v1Record("new-v1", { mode: "linux-env-pgid", createdAt: "2026-01-04T00:00:00.000Z" });
+  const newRecord = v1Record("new-v1", { ...ghostMode, createdAt: "2026-01-04T00:00:00.000Z" });
   const afterView = new JobIndex(store, { readV1: () => [newRecord], staleness: () => { viewCalls++; return view; } });
   afterView.rebuild();
   expect(afterView.list().map((job) => job.jobId)).toEqual(["new-v1"]);
@@ -243,7 +247,7 @@ test("a v1 record written after the view's scan stays live even when createdAt p
   const saved = process.env.AGTOP_STATE_DIR; process.env.AGTOP_STATE_DIR = root;
   try {
     const takenAtMs = Date.now() - 1000;
-    const record = v1Record("spawning", { mode: "linux-env-pgid", rootPid: 99_999, startTime: "5", createdAt: new Date(takenAtMs - 500).toISOString() });
+    const record = v1Record("spawning", { ...ghostMode, rootPid: 99_999, startTime: "5", createdAt: new Date(takenAtMs - 500).toISOString() });
     writeJob(record);
     const index = new JobIndex(store, { readV1: () => [record], staleness: () => ({ takenAtMs, processes: [] }) });
     index.rebuild();
