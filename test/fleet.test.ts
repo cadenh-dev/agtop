@@ -34,7 +34,7 @@ const admin: Caller = { kind: "admin" };
 const asSession = (service: FleetService, peer = "agent-1"): Caller => ({ kind: "session", session: service.session, peer });
 const codeOf = (fn: () => unknown): string | undefined => { try { fn(); return undefined; } catch (error) { return error instanceof FleetError ? error.code : String(error); } };
 
-async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity, refresher?: { scan: () => Promise<ProcessIdentity[]>; intervalMs?: number }): Promise<FleetService> {
+async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity, refresher?: { scan: (signal: AbortSignal) => Promise<ProcessIdentity[]>; intervalMs?: number }): Promise<FleetService> {
   const spawn = (async (options: SpawnAgentOptions) => {
     let finish!: (code: number) => void;
     const exited = new Promise<number>((resolve) => { finish = resolve; });
@@ -120,6 +120,32 @@ test("a v1 job created after the last view occupies maxRunning until a later vie
   expect(codeOf(() => service.get("fresh-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND");
   expect(service.get(queued.jobId, asSession(service)).job.state).toBe("running");
 });
+test("staleness refresher keeps the last view on failure, scans once per unchanged set, and aborts on close", async () => {
+  writeJob({ version: 1, jobId: "gone-v1", rootPid: 99_988, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  fs.utimesSync(path.join(root, "gone-v1.json"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  let calls = 0, release!: () => void, aborted = false;
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  const service = await openFleet("library", identity("backoff"), { intervalMs: 5, scan: async (signal: AbortSignal) => {
+    calls++;
+    if (calls === 1) return [];
+    signal.addEventListener("abort", () => { aborted = true; });
+    await hold; // a slow scan: the next ticks must not start another one
+    throw new Error("scan failed");
+  } });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(calls).toBe(1); // the set of v1 records did not change, so no rescan
+  expect(codeOf(() => service.get("gone-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND");
+  writeJob({ version: 1, jobId: "another-v1", rootPid: 99_987, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(calls).toBe(2); // the set changed: one more scan, which is still in flight
+  release(); await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(codeOf(() => service.get("gone-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND"); // the failed scan kept the last view
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  void pending;
+  await service.close();
+  expect(aborted).toBe(true);
+});
+
 test("every submit validation failure names its field", async () => {
   const service = await openFleet(), caller = asSession(service);
   const cases: Array<[string, Record<string, unknown>]> = [

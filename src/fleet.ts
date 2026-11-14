@@ -45,7 +45,7 @@ export interface FleetOpenOptions {
   surface: FleetSurface; session?: SessionIdentity; trees?: () => AgentProcessTree[];
   spawn?: typeof spawnContainedAgent; capture?: CaptureProvider;
   reconcile?: { snapshot?: () => ProcessIdentity[]; now?: () => Date };
-  stalenessScan?: () => Promise<ProcessIdentity[]>;
+  stalenessScan?: (signal: AbortSignal) => Promise<ProcessIdentity[]>;
   /** Test seam; production keeps the 15-second refresh cadence. */
   stalenessRefreshMs?: number;
   guard?: { accelerators?: () => AcceleratorSnapshot | undefined; freeMemoryMb?: () => number; now?: () => number };
@@ -136,9 +136,12 @@ interface ServiceDeps {
   surface: FleetSurface; session: SessionIdentity; store: EventStore; index: JobIndex; leases: LeaseManager;
   guard: ResourcePolicyGuard; runtime: JobRuntime; scheduler: Scheduler; trees: () => AgentProcessTree[];
   policy: { current: AdmissionPolicy }; lifecycle: { closed: boolean };
-  stalenessScan: () => Promise<ProcessIdentity[]>;
+  stalenessScan: (signal: AbortSignal) => Promise<ProcessIdentity[]>;
   stalenessRefreshMs: number;
 }
+
+/** While the set of unshadowed v1 records is unchanged, the staleness scan repeats at most this often. */
+const STALENESS_IDLE_RESCAN_MS = 300_000;
 
 /** The one object the daemon, MCP server, CLI and federation listener call (contracts 8.7). */
 export class FleetService {
@@ -164,7 +167,7 @@ export class FleetService {
     scheduler = new Scheduler({ runtime, index, leases, guard, policy: () => policy.current, listeners });
     try {
       scheduler.start();
-      const service = new FleetService({ surface: options.surface, session, store, index, leases, guard, runtime, scheduler, trees, policy, lifecycle, stalenessScan: options.stalenessScan ?? processSnapshotAsync, stalenessRefreshMs: options.stalenessRefreshMs ?? 15_000 });
+      const service = new FleetService({ surface: options.surface, session, store, index, leases, guard, runtime, scheduler, trees, policy, lifecycle, stalenessScan: options.stalenessScan ?? ((signal) => processSnapshotAsync(process.platform, signal)), stalenessRefreshMs: options.stalenessRefreshMs ?? 15_000 });
       service.startStalenessRefresher((view) => { stalenessView = view; });
       return service;
     } catch (error) {
@@ -179,17 +182,24 @@ export class FleetService {
   private closing: Promise<void> | undefined;
   private stalenessTimer?: NodeJS.Timeout;
   private stalenessScanInFlight = false;
+  private readonly stalenessAbort = new AbortController();
   private readonly hydrated = new Map<string, { ring: OutputRingBuffer; stamp: string }>();
   private constructor(deps: ServiceDeps) { this.deps = deps; this.session = deps.session; this.leases = deps.leases; }
 
   private startStalenessRefresher(setView: (view: { takenAtMs: number; processes: ProcessIdentity[] }) => void): void {
+    // A full scan (PowerShell on Windows) is only worth repeating when the v1 records changed;
+    // otherwise rescan at most every STALENESS_IDLE_RESCAN_MS so a later crash is still noticed.
+    let lastKey = "", lastScanMs = 0;
     const scan = async (): Promise<void> => {
-      if (this.deps.lifecycle.closed || this.stalenessScanInFlight || !this.deps.index.hasUnshadowedV1Records()) return;
+      if (this.deps.lifecycle.closed || this.stalenessScanInFlight) return;
+      const key = this.deps.index.unshadowedV1Ids().join("\n");
+      if (key === "" || (key === lastKey && Date.now() - lastScanMs < STALENESS_IDLE_RESCAN_MS)) return;
       this.stalenessScanInFlight = true;
       const takenAtMs = Date.now();
       try {
-        const processes = await this.deps.stalenessScan();
+        const processes = await this.deps.stalenessScan(this.stalenessAbort.signal);
         if (this.deps.lifecycle.closed) return;
+        lastKey = key; lastScanMs = takenAtMs;
         setView({ takenAtMs, processes });
         this.deps.index.refresh();
         void this.deps.scheduler.tick().catch(() => undefined);
@@ -395,6 +405,7 @@ export class FleetService {
   private async shutdown(): Promise<void> {
     this.deps.lifecycle.closed = true;
     if (this.stalenessTimer !== undefined) clearInterval(this.stalenessTimer);
+    this.stalenessAbort.abort(); // a one-shot CLI must not wait for an in-flight PowerShell scan
     this.deps.scheduler.stop();
     // shutdown() also cancels own queued jobs, and start() refuses a job that is no longer queued,
     // so an admission pass still in flight cannot start anything after this; submit() refuses too.

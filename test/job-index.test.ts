@@ -238,6 +238,29 @@ test("Windows v1 staleness keeps live roots and opened jobs", () => {
   expect(isStaleV1Record(record, view, { platform: "win32", withJob: () => [4242] })).toBe(false);
 });
 
+test("a v1 record written after the view's scan stays live even when createdAt predates it", () => {
+  // createdAt is stamped before the spawn; a scan in between misses the new process.
+  const saved = process.env.AGTOP_STATE_DIR; process.env.AGTOP_STATE_DIR = root;
+  try {
+    const takenAtMs = Date.now() - 1000;
+    const record = v1Record("spawning", { mode: "linux-env-pgid", rootPid: 99_999, startTime: "5", createdAt: new Date(takenAtMs - 500).toISOString() });
+    writeJob(record);
+    const index = new JobIndex(store, { readV1: () => [record], staleness: () => ({ takenAtMs, processes: [] }) });
+    index.rebuild();
+    expect(index.list().map((job) => job.jobId)).toEqual(["spawning"]);
+    const before = new Date(takenAtMs - 400);
+    fs.utimesSync(path.join(root, "spawning.json"), before, before);
+    index.refresh();
+    expect(index.list()).toEqual([]);
+  } finally { if (saved === undefined) delete process.env.AGTOP_STATE_DIR; else process.env.AGTOP_STATE_DIR = saved; }
+});
+
+test("Windows v1 staleness treats an unknown start time as live", () => {
+  const record = v1Record("win-unknown", { mode: "win32-job-object", jobName: "Global\\job", rootPid: 4242, startTime: "" });
+  const view = { takenAtMs: Date.parse("2026-01-03T00:00:00Z"), processes: [] as ProcessIdentity[] };
+  expect(isStaleV1Record(record, view, { platform: "win32", withJob: () => undefined })).toBe(false);
+});
+
 test("rebuilds 200 finished jobs in under one second", () => {
   let events = 0;
   for (let i = 0; i < 200; i++) events += writeFinishedLog(root, makeRecord(`perf-${i.toString().padStart(3, "0")}`));

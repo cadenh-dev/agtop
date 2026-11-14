@@ -128,6 +128,14 @@ function retentionHours(): number {
   if (raw === undefined || raw.trim() === "") return RETENTION_HOURS;
   const value = Number(raw); return Number.isFinite(value) && value >= 0 ? value : RETENTION_HOURS;
 }
+/** Puts a renamed-aside v1 record back unless a newer record now holds the path; never drops the only copy. */
+function restoreAside(aside: string, companion: string): void {
+  try {
+    if (!fs.existsSync(aside)) return;
+    if (!fs.existsSync(companion)) { fs.renameSync(aside, companion); return; }
+    fs.rmSync(aside, { force: true }); // the newer record at the path wins; the aside copy is the stale one
+  } catch { /* Leave the aside file; readJobs ignores names that do not end in .json. */ }
+}
 function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: number, rename: typeof fs.renameSync = fs.renameSync): string[] {
   const list = [...records], protectedIds = new Set<string>(), pruned: string[] = [];
   for (const record of list) if (record.state === "queued") for (const dependency of record.queue.dependsOn) protectedIds.add(dependency);
@@ -142,15 +150,14 @@ function pruneJobDirs(store: EventStore, records: Iterable<JobRecordV2>, nowMs: 
       try {
         rename(companion, aside);
         const moved = fs.readFileSync(aside);
-        if (!moved.equals(raw!)) {
-          try { fs.linkSync(aside, companion); } catch { /* A newer record already occupies the path. */ }
-          fs.rmSync(aside, { force: true });
-        } else fs.rmSync(aside, { force: true, maxRetries: 3, retryDelay: 100 });
+        // A newer record took the ID between the read and the rename: put it back and still prune the
+        // expired fleet directory, which would otherwise shadow the live record (contracts 2.2).
+        if (!moved.equals(raw!)) restoreAside(aside, companion);
+        else fs.rmSync(aside, { force: true, maxRetries: 3, retryDelay: 100 });
       }
       catch (error) {
         process.stderr.write(`agtop: fleet retention could not remove v1 companion ${record.jobId}: ${message(error)}\n`);
-        try { if (fs.existsSync(aside) && !fs.existsSync(companion)) fs.linkSync(aside, companion); } catch { /* Preserve whichever record remains reachable. */ }
-        try { fs.rmSync(aside, { force: true }); } catch { /* Best effort cleanup. */ }
+        restoreAside(aside, companion);
         return false;
       }
     }

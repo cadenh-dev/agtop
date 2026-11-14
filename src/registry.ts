@@ -57,9 +57,9 @@ function processSnapshotFast(platform: NodeJS.Platform): ProcessIdentity[] {
     } catch { return []; }
   });
 }
-export async function processSnapshotAsync(platform: NodeJS.Platform = process.platform): Promise<ProcessIdentity[]> {
+export async function processSnapshotAsync(platform: NodeJS.Platform = process.platform, signal?: AbortSignal): Promise<ProcessIdentity[]> {
   if (platform !== "win32") return processSnapshotFast(platform);
-  const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", powershellProcesses], { encoding: "utf8", windowsHide: true, timeout: 20000 }) as { stdout: string };
+  const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", powershellProcesses], { encoding: "utf8", windowsHide: true, timeout: 20000, ...(signal ? { signal } : {}) }) as { stdout: string };
   return parseWindowsSnapshot(stdout);
 }
 function cgroupPids(dir: string): number[] {
