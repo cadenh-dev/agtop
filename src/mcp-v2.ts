@@ -277,6 +277,7 @@ export function registerFleetTools(server: McpServer, fleet: FleetService, helpe
     const caller = callerFor(extra);
     try {
       const q = query?.toLowerCase();
+      await fleet.awaitFirstScan(); // a list right after the server starts must not show dead v1 jobs as running
       const fleetJobs = fleet.list({ limit: 500 }, caller).jobs;
       const byId = new Map(fleetJobs.map(job => [job.jobId, job]));
       const jobs: Array<Record<string, unknown>> = [];
