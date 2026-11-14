@@ -180,6 +180,9 @@ Known limitations in v0.2:
 
 - MCP `list` and `status` reuse one process scan for up to 2 seconds, so another agent's process can appear or disappear up to 2 seconds late. A session's own jobs refresh immediately after `run`, `wait`, `kill` and `cleanup`.
 - A command that prints a never-ending stream without newlines (progress dots) is shown in 1 KiB pieces or after a 2-second pause, because a secret could still be arriving.
+- The GPU and NPU busy guards act only where agtop measures device utilization: NVIDIA GPUs through NVML, and macOS. On Windows and on AMD or Intel GPUs under Linux there is no device reading yet, so these guards never hold a job back; a `resources: { "gpu": true }` job is admitted as soon as other caps allow.
+- Output a job printed in the last seconds before a power loss can be missing after the restart (lifecycle states are flushed to disk, output is not), and `agtop logs` does not mark the gap.
+- A job left behind by a crashed `agtop run` keeps its admission slot until the next process scan proves it dead: up to 5 minutes on Windows, about 15 seconds elsewhere.
 - Federation replay protection is kept in memory: right after a daemon restart, a request captured in the previous 60 seconds could be replayed once. TLS and per-peer scopes still apply.
 - Two `agtop peers add` or `remove` commands run at the same moment: the last one wins.
 - The exit signal of a job is not reported (`signal` is always `null`); the exit code is.
