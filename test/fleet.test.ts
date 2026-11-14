@@ -108,9 +108,12 @@ test("staleness refresher runs only for unshadowed v1 records, outside the lock,
 test("a v1 job created after the last view occupies maxRunning until a later view proves it stale", async () => {
   const stale = { version: 1 as const, jobId: "old-v1", rootPid: 99990, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", ...ghostMode, createdAt: new Date(Date.now() - 120_000).toISOString() };
   writeJob(stale as JobRecord);
-  let scans = 0, first!: () => void;
+  // Scans after the first wait for the gate, so no new view can land before the "still live" checks
+  // (a slow CI runner otherwise reaches the next 20 ms tick first).
+  let scans = 0, first!: () => void, openGate!: () => void;
   const firstScan = new Promise<void>((resolve) => { first = resolve; });
-  const service = await openFleet("library", identity("caps"), { intervalMs: 20, scan: async () => { scans++; if (scans === 1) first(); return []; } });
+  const gate = new Promise<void>((resolve) => { openGate = resolve; });
+  const service = await openFleet("library", identity("caps"), { intervalMs: 20, scan: async () => { scans++; if (scans === 1) { first(); return []; } await gate; return []; } });
   service.setPolicy({ ...DEFAULT_ADMISSION_POLICY, maxRunning: 1 });
   await firstScan;
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -120,7 +123,12 @@ test("a v1 job created after the last view occupies maxRunning until a later vie
   await new Promise((resolve) => setTimeout(resolve, 10));
   expect(service.get("fresh-v1", asSession(service)).job.state).toBe("running");
   expect(service.get(queued.jobId, asSession(service)).job.state).toBe("queued");
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  openGate();
+  // A scan that began before fresh-v1 existed cannot prove it dead; a later one does.
+  for (const deadline = Date.now() + 5000; Date.now() < deadline;) {
+    if (codeOf(() => service.get("fresh-v1", asSession(service))) === "E_JOB_NOT_FOUND" && service.get(queued.jobId, asSession(service)).job.state !== "queued") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   expect(codeOf(() => service.get("fresh-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND");
   expect(service.get(queued.jobId, asSession(service)).job.state).toBe("running");
 });
