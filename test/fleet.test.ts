@@ -174,6 +174,11 @@ test("a listing open waits for the first staleness scan, bounded, so one-shot co
   const plain = await openFleet("cli", identity("cli-plain"), { scan: never, intervalMs: 60_000 });
   expect(plain.get("cli-ghost", admin).job.state).toBe("running");
   await plain.close();
+  // Long-lived surfaces (MCP list, daemon /v1/jobs) wait lazily instead: the first call waits for the scan.
+  const lazy = await openFleet("mcp", identity("mcp-lazy"), { scan: slow, intervalMs: 60_000 });
+  expect(await lazy.awaitFirstScan()).toBe(true);
+  expect(codeOf(() => lazy.get("cli-ghost", admin))).toBe("E_JOB_NOT_FOUND");
+  await lazy.close();
   // A scan that never finishes cannot hold the listing; it says so on stderr and shows the record as live.
   const writes: string[] = [], write = process.stderr.write.bind(process.stderr);
   (process.stderr as { write: unknown }).write = (chunk: string | Uint8Array) => { writes.push(String(chunk)); return true; };
@@ -182,8 +187,13 @@ test("a listing open waits for the first staleness scan, bounded, so one-shot co
     const stuck = await openFleet("cli", identity("cli-b"), { scan: never, intervalMs: 60_000, listing: true, waitMs: 50 });
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(stuck.get("cli-ghost", admin).job.state).toBe("running"); // no view: unknown counts as live
+    // The timed-out wait is shared and not retried: later lists return at once, with no second warning.
+    started = Date.now();
+    expect(await stuck.awaitFirstScan()).toBe(false);
+    expect(Date.now() - started).toBeLessThan(40);
   } finally { (process.stderr as { write: unknown }).write = write; }
   expect(writes.join("")).toContain("process scan is still running");
+  expect(writes.join("").match(/process scan is still running/g)).toHaveLength(1);
 });
 
 test("every submit validation failure names its field", async () => {

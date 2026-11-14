@@ -148,9 +148,10 @@ interface ServiceDeps {
   stalenessScan: (signal: AbortSignal) => Promise<ProcessIdentity[]>;
   stalenessRefreshMs: number;
   stalenessIdleRescanMs: number;
+  firstScanWaitMs: number;
 }
 
-/** Upper bound on how long an open with waitForFirstScan waits for the first staleness scan. */
+/** Upper bound on how long awaitFirstScan (and an open with waitForFirstScan) waits for the first staleness scan. */
 const FIRST_SCAN_WAIT_MS = 5_000;
 /** True when `promise` settled within `ms`, false on timeout. The timer is ref'd so the wait is binding. */
 async function waitAtMost(promise: Promise<void>, ms: number): Promise<boolean> {
@@ -185,13 +186,11 @@ export class FleetService {
     scheduler = new Scheduler({ runtime, index, leases, guard, policy: () => policy.current, listeners });
     try {
       scheduler.start();
-      const service = new FleetService({ surface: options.surface, session, store, index, leases, guard, runtime, scheduler, trees, policy, lifecycle, stalenessScan: options.stalenessScan ?? ((signal) => processSnapshotAsync(process.platform, signal)), stalenessRefreshMs: options.stalenessRefreshMs ?? 15_000, stalenessIdleRescanMs: options.stalenessIdleRescanMs ?? (process.platform === "win32" ? STALENESS_IDLE_RESCAN_MS : 0) });
-      const firstScan = service.startStalenessRefresher((view) => { stalenessView = view; });
+      const service = new FleetService({ surface: options.surface, session, store, index, leases, guard, runtime, scheduler, trees, policy, lifecycle, stalenessScan: options.stalenessScan ?? ((signal) => processSnapshotAsync(process.platform, signal)), stalenessRefreshMs: options.stalenessRefreshMs ?? 15_000, stalenessIdleRescanMs: options.stalenessIdleRescanMs ?? (process.platform === "win32" ? STALENESS_IDLE_RESCAN_MS : 0), firstScanWaitMs: options.firstScanWaitMs ?? FIRST_SCAN_WAIT_MS });
+      service.firstScan = service.startStalenessRefresher((view) => { stalenessView = view; });
       // A one-shot listing prints right away and exits; without the first view it would show leftover
       // v1 records of dead jobs as running. The scan only runs when such records exist.
-      if (options.waitForFirstScan && !(await waitAtMost(firstScan, options.firstScanWaitMs ?? FIRST_SCAN_WAIT_MS))) {
-        process.stderr.write("agtop: the process scan is still running; jobs whose process already ended may still show as running.\n");
-      }
+      if (options.waitForFirstScan) await service.awaitFirstScan();
       return service;
     } catch (error) {
       scheduler.stop(); // a failed open leaves no timer behind
@@ -204,10 +203,26 @@ export class FleetService {
   private readonly deps: ServiceDeps;
   private closing: Promise<void> | undefined;
   private stalenessTimer?: NodeJS.Timeout;
+  private firstScan: Promise<void> = Promise.resolve();
+  private firstScanWait: Promise<boolean> | undefined;
   private stalenessScanInFlight = false;
   private readonly stalenessAbort = new AbortController();
   private readonly hydrated = new Map<string, { ring: OutputRingBuffer; stamp: string }>();
   private constructor(deps: ServiceDeps) { this.deps = deps; this.session = deps.session; this.leases = deps.leases; }
+
+  /**
+   * Waits, at most firstScanWaitMs (5 s) and only once per service, for the first staleness scan, so a
+   * listing right after open() does not show leftover v1 records of dead jobs as running. Concurrent and
+   * later callers share the one wait; a timeout writes one stderr line and is not retried. Resolves true
+   * when the scan finished (or was skipped because no unshadowed v1 records exist).
+   */
+  awaitFirstScan(): Promise<boolean> {
+    this.firstScanWait ??= waitAtMost(this.firstScan, this.deps.firstScanWaitMs).then((done) => {
+      if (!done) process.stderr.write("agtop: the process scan is still running; jobs whose process already ended may still show as running.\n");
+      return done;
+    });
+    return this.firstScanWait;
+  }
 
   /** Starts the refresher; the returned promise settles when its first scan (if any) is done. */
   private startStalenessRefresher(setView: (view: { takenAtMs: number; processes: ProcessIdentity[] }) => void): Promise<void> {

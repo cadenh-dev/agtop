@@ -121,6 +121,7 @@ async function dispatch(fleet: FleetService, ctx: RouteContext): Promise<RouteRe
   if (method === "GET" && path === "/v1/jobs") {
     const states = statesParam(query), peer = query.get("peer"), harness = query.get("harness");
     const owner = query.get("owner"), after = query.get("after");
+    await fleet.awaitFirstScan(); // only waits once, right after the daemon starts
     return { status: 200, body: fleet.list({
       ...(states === undefined ? {} : { states }),
       ...(peer === null ? {} : { peer }),
