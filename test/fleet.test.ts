@@ -38,7 +38,7 @@ const admin: Caller = { kind: "admin" };
 const asSession = (service: FleetService, peer = "agent-1"): Caller => ({ kind: "session", session: service.session, peer });
 const codeOf = (fn: () => unknown): string | undefined => { try { fn(); return undefined; } catch (error) { return error instanceof FleetError ? error.code : String(error); } };
 
-async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity, refresher?: { scan: (signal: AbortSignal) => Promise<ProcessIdentity[]>; intervalMs?: number; idleMs?: number }): Promise<FleetService> {
+async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity, refresher?: { scan: (signal: AbortSignal) => Promise<ProcessIdentity[]>; intervalMs?: number; idleMs?: number; cliWaitMs?: number }): Promise<FleetService> {
   const spawn = (async (options: SpawnAgentOptions) => {
     let finish!: (code: number) => void;
     const exited = new Promise<number>((resolve) => { finish = resolve; });
@@ -59,7 +59,7 @@ async function openFleet(surface: FleetSurface = "library", session?: SessionIde
   };
   const snapshot = (): Array<{ pid: number; startTime: string }> => [{ pid: process.pid, startTime: selfSupervisor("library").startTime }];
   const service = await FleetService.open({ surface, ...(session === undefined ? {} : { session }), spawn, capture,
-    ...(refresher === undefined ? {} : { stalenessScan: refresher.scan, stalenessRefreshMs: refresher.intervalMs, ...(refresher.idleMs === undefined ? {} : { stalenessIdleRescanMs: refresher.idleMs }) }),
+    ...(refresher === undefined ? {} : { stalenessScan: refresher.scan, stalenessRefreshMs: refresher.intervalMs, ...(refresher.idleMs === undefined ? {} : { stalenessIdleRescanMs: refresher.idleMs }), ...(refresher.cliWaitMs === undefined ? {} : { cliFirstScanWaitMs: refresher.cliWaitMs }) }),
     reconcile: { snapshot }, guard: { accelerators: () => undefined, freeMemoryMb: () => 100_000 } });
   services.push(service);
   return service;
@@ -154,6 +154,23 @@ test("staleness refresher keeps the last view on failure, scans once per unchang
   expect(codeOf(() => service.get("gone-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND"); // the failed scan kept the last view
   await service.close();
   expect(aborted).toBe(true);
+});
+
+test("a CLI open waits for the first staleness scan, bounded, so one-shot commands hide dead v1 records", async () => {
+  const ghost = { version: 1 as const, jobId: "cli-ghost", rootPid: 99_986, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", ...ghostMode, createdAt: new Date(Date.now() - 60_000).toISOString() };
+  writeJob(ghost as JobRecord);
+  fs.utimesSync(path.join(root, "cli-ghost.json"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  const slow = async (): Promise<ProcessIdentity[]> => { await new Promise((resolve) => setTimeout(resolve, 60)); return []; };
+  const cli = await openFleet("cli", identity("cli-a"), { scan: slow, intervalMs: 60_000 });
+  expect(codeOf(() => cli.get("cli-ghost", admin))).toBe("E_JOB_NOT_FOUND"); // the first view landed before open() returned
+  await cli.close();
+  const library = await openFleet("library", identity("lib-a"), { scan: slow, intervalMs: 60_000 });
+  expect(library.get("cli-ghost", admin).job.state).toBe("running"); // non-CLI surfaces do not wait
+  await library.close();
+  const started = Date.now();
+  const stuck = await openFleet("cli", identity("cli-b"), { scan: () => new Promise<ProcessIdentity[]>(() => {}), intervalMs: 60_000, cliWaitMs: 50 });
+  expect(Date.now() - started).toBeLessThan(2_000); // a scan that never finishes cannot hold the CLI
+  expect(stuck.get("cli-ghost", admin).job.state).toBe("running"); // no view: unknown counts as live
 });
 
 test("every submit validation failure names its field", async () => {
