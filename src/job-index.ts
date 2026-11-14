@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { jobDir, type EventStore } from "./event-store.js";
+import type { EventStore } from "./event-store.js";
 import { RUNNING_STATES } from "./job-state.js";
-import { readJobs } from "./registry.js";
+import { isStaleJob, readJobs, stateDir, type ProcessIdentity } from "./registry.js";
+import { windowsApi } from "./windows.js";
 import type { CaptureSpec, JobContainment, JobEvent, JobOwner, JobRecord, JobRecordV2, JobState, JobSummaryV2, QueueSpec, SupervisorIdentity } from "./types.js";
 
 /** Folds lifecycle events into a record. Returns undefined when seq 1 is missing or carries no record. */
@@ -58,12 +59,37 @@ export function toSummary(record: JobRecordV2, caller: { owned: boolean; showCom
 
 export interface JobFilter { states?: JobState[]; peer?: string; harness?: string; ownerSessionId?: string }
 export interface IndexRebuildStats { jobs: number; events: number; corruptTailBytes: number; durationMs: number }
+export interface StalenessView { takenAtMs: number; processes: ProcessIdentity[] }
+export function isStaleV1Record(record: JobRecord, view: StalenessView, options?: { platform?: NodeJS.Platform; withJob?: (name: string) => number[] | undefined }): boolean {
+  const platform = options?.platform ?? process.platform;
+  if (record.mode === "win32-job-object" && platform === "win32") {
+    const root = view.processes.find((item) => item.pid === record.rootPid);
+    // Same rule as isStaleJob: an unknown start time or job name cannot prove the job dead.
+    if (!/^\d+$/.test(record.startTime) || root?.startTime === record.startTime || !record.jobName) return false;
+    try {
+      const pids = options?.withJob ? options.withJob(record.jobName) : windowsApi().withJob(record.jobName, 4, (h) => windowsApi().pids(h));
+      return pids === undefined || isStaleJob(record, view.processes, pids, platform);
+    } catch { return false; }
+  }
+  if (isStaleJob(record, view.processes, undefined, platform)) return true;
+  return false;
+}
 
-/** EventStore keeps its custom root private; a store built with { root } logs under <root>/fleet/jobs (lead decision D3). */
-interface StoreWithRoot { root?: string }
+/**
+ * True when the record existed before the view's scan began. createdAt is stamped before the
+ * process is spawned, so it alone could predate a scan that missed the new process; writeJob
+ * writes the record file after the spawn, so its write time is used when the file is readable.
+ */
+function olderThanView(record: JobRecord, view: StalenessView): boolean {
+  const created = Date.parse(record.createdAt);
+  if (!Number.isFinite(created) || created >= view.takenAtMs) return false;
+  let written: number;
+  try { written = fs.statSync(path.join(stateDir(), `${record.jobId}.json`)).mtimeMs; } catch { written = created; }
+  return written < view.takenAtMs;
+}
+
 function eventsFile(store: EventStore, jobId: string): string {
-  const root = (store as unknown as StoreWithRoot).root;
-  return root === undefined ? path.join(jobDir(jobId), "events.jsonl") : path.join(root, "fleet", "jobs", jobId, "events.jsonl");
+  return path.join(store.stateRoot, "fleet", "jobs", jobId, "events.jsonl");
 }
 /** File size, or -1 when the log does not exist yet. */
 function logSize(file: string): number {
@@ -78,12 +104,13 @@ function logSize(file: string): number {
 export class JobIndex {
   private readonly store: EventStore;
   private readonly readV1: () => JobRecord[];
+  private readonly staleness?: () => StalenessView | undefined;
   private readonly sizes = new Map<string, number>();
   private readonly fleet = new Map<string, JobRecordV2>();
   private readonly v1 = new Map<string, JobRecordV2>();
 
-  constructor(store: EventStore, options?: { readV1?: () => JobRecord[] }) {
-    this.store = store; this.readV1 = options?.readV1 ?? readJobs;
+  constructor(store: EventStore, options?: { readV1?: () => JobRecord[]; staleness?: () => StalenessView | undefined }) {
+    this.store = store; this.readV1 = options?.readV1 ?? readJobs; this.staleness = options?.staleness;
   }
 
   rebuild(): IndexRebuildStats {
@@ -175,6 +202,13 @@ export class JobIndex {
 
   private reloadV1(): void {
     this.v1.clear();
-    for (const record of this.readV1()) if (!this.fleet.has(record.jobId)) this.v1.set(record.jobId, migrateV1Record(record));
+    const records = this.readV1().filter((record) => !this.fleet.has(record.jobId));
+    const view = records.length ? this.staleness?.() : undefined;
+    for (const record of records) {
+      if (view !== undefined && olderThanView(record, view) && isStaleV1Record(record, view)) continue;
+      this.v1.set(record.jobId, migrateV1Record(record));
+    }
   }
+  /** IDs of v1 records without a fleet directory, sorted; lets the refresher skip unchanged sets. */
+  unshadowedV1Ids(): string[] { return this.readV1().filter((record) => !this.fleet.has(record.jobId)).map((record) => record.jobId).sort(); }
 }

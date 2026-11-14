@@ -147,6 +147,8 @@ interface SegmentRead { chunks: StoredChunk[]; firstSeq: { stdout: number | null
 export class EventStore {
   private readonly root?: string; private readonly now: () => Date;
   constructor(options?: { root?: string; now?: () => Date }) { this.root = options?.root; this.now = options?.now ?? (() => new Date()); }
+  /** State directory used by this store, including a caller supplied root. */
+  get stateRoot(): string { return this.root ?? stateDir(); }
   /** Creates the job directory and writes seq 1; throws E_JOB_EXISTS for a non-terminal job, replaces a terminal one. */
   create(record: JobRecordV2): JobEventWriter {
     validateJobId(record.jobId);

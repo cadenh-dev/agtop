@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import * as fs from "node:fs"; import * as os from "node:os"; import * as path from "node:path";
 import { EventStore, encodeFrame } from "../src/event-store.js";
-import { foldEvents, JobIndex, migrateV1Record, toSummary } from "../src/job-index.js";
-import { readJobs, writeJob } from "../src/registry.js";
+import { foldEvents, JobIndex, migrateV1Record, toSummary, isStaleV1Record } from "../src/job-index.js";
+import { readJobs, writeJob, type ProcessIdentity } from "../src/registry.js";
 import type { JobEvent, JobRecord, JobRecordPatch, JobRecordV2 } from "../src/types.js";
 
 let root: string, store: EventStore;
@@ -21,6 +21,7 @@ function makeRecord(jobId: string, overrides: Partial<JobRecordV2> = {}): JobRec
 function v1Record(jobId: string, overrides: Partial<JobRecord> = {}): JobRecord {
   return { version: 1, jobId, rootPid: 4242, startTime: "100", harness: "custom", peer: "peer-v1", cwd: os.tmpdir(), backend: "unknown", mode: "passive-ppid", createdAt: "2026-01-02T00:00:00.000Z", ...overrides };
 }
+const liveV1Snapshot: ProcessIdentity[] = [{ pid: 4242, startTime: "100" }];
 /** Writes a valid five-event finished-job log directly, without fsync, to keep the 200-job test fast. */
 function writeFinishedLog(stateRoot: string, record: JobRecordV2): number {
   const dir = path.join(stateRoot, "fleet", "jobs", record.jobId), ts = record.createdAt;
@@ -202,13 +203,62 @@ test("uses the default state directory and keeps readJobs() to v1 records", () =
   try {
     writeJob(v1Record("v1-only"));
     const defaultStore = new EventStore(); defaultStore.create(makeRecord("fleet-job")).close();
-    const index = new JobIndex(defaultStore); index.rebuild();
+    const index = new JobIndex(defaultStore, {}); index.rebuild();
     expect(index.list().map((record) => record.jobId).sort()).toEqual(["fleet-job", "v1-only"]);
     expect(index.get("v1-only")!.state).toBe("running"); expect(readJobs().map((record) => record.jobId)).toEqual(["v1-only"]);
   } finally {
     if (previous === undefined) delete process.env.AGTOP_STATE_DIR; else process.env.AGTOP_STATE_DIR = previous;
     fs.rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("JobIndex filters only v1 records older than an injected view and never scans", () => {
+  const live = v1Record("live-v1", { mode: "linux-env-pgid" });
+  const stale = v1Record("stale-v1", { jobId: "stale-v1", rootPid: 9000, mode: "linux-env-pgid" });
+  let viewCalls = 0;
+  const view = { takenAtMs: Date.parse("2026-01-03T00:00:00Z"), processes: liveV1Snapshot };
+  const index = new JobIndex(store, { readV1: () => [live, stale], staleness: () => view });
+  index.rebuild();
+  expect(index.list().map((job) => job.jobId)).toEqual(["live-v1"]);
+  expect(index.runningCounts().total).toBe(1);
+  const newRecord = v1Record("new-v1", { mode: "linux-env-pgid", createdAt: "2026-01-04T00:00:00.000Z" });
+  const afterView = new JobIndex(store, { readV1: () => [newRecord], staleness: () => { viewCalls++; return view; } });
+  afterView.rebuild();
+  expect(afterView.list().map((job) => job.jobId)).toEqual(["new-v1"]);
+  expect(afterView.runningCounts().total).toBe(1); expect(viewCalls).toBe(1);
+  const bare = new JobIndex(store, { readV1: () => [stale] }); bare.rebuild();
+  expect(bare.list().map((job) => job.jobId)).toEqual(["stale-v1"]);
+});
+
+test("Windows v1 staleness keeps live roots and opened jobs", () => {
+  const record = v1Record("win-v1", { mode: "win32-job-object", jobName: "Global\\job", rootPid: 4242 });
+  const view = { takenAtMs: Date.parse("2026-01-03T00:00:00Z"), processes: [] as ProcessIdentity[] };
+  expect(isStaleV1Record(record, view, { platform: "win32", withJob: () => undefined })).toBe(true);
+  expect(isStaleV1Record(record, { ...view, processes: [{ pid: 4242, startTime: "100" }] }, { platform: "win32", withJob: () => undefined })).toBe(false);
+  expect(isStaleV1Record(record, view, { platform: "win32", withJob: () => [4242] })).toBe(false);
+});
+
+test("a v1 record written after the view's scan stays live even when createdAt predates it", () => {
+  // createdAt is stamped before the spawn; a scan in between misses the new process.
+  const saved = process.env.AGTOP_STATE_DIR; process.env.AGTOP_STATE_DIR = root;
+  try {
+    const takenAtMs = Date.now() - 1000;
+    const record = v1Record("spawning", { mode: "linux-env-pgid", rootPid: 99_999, startTime: "5", createdAt: new Date(takenAtMs - 500).toISOString() });
+    writeJob(record);
+    const index = new JobIndex(store, { readV1: () => [record], staleness: () => ({ takenAtMs, processes: [] }) });
+    index.rebuild();
+    expect(index.list().map((job) => job.jobId)).toEqual(["spawning"]);
+    const before = new Date(takenAtMs - 400);
+    fs.utimesSync(path.join(root, "spawning.json"), before, before);
+    index.refresh();
+    expect(index.list()).toEqual([]);
+  } finally { if (saved === undefined) delete process.env.AGTOP_STATE_DIR; else process.env.AGTOP_STATE_DIR = saved; }
+});
+
+test("Windows v1 staleness treats an unknown start time as live", () => {
+  const record = v1Record("win-unknown", { mode: "win32-job-object", jobName: "Global\\job", rootPid: 4242, startTime: "" });
+  const view = { takenAtMs: Date.parse("2026-01-03T00:00:00Z"), processes: [] as ProcessIdentity[] };
+  expect(isStaleV1Record(record, view, { platform: "win32", withJob: () => undefined })).toBe(false);
 });
 
 test("rebuilds 200 finished jobs in under one second", () => {

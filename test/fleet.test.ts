@@ -11,7 +11,8 @@ import { readKillRequest, selfSupervisor, type SessionIdentity } from "../src/jo
 import type { Caller } from "../src/ownership.js";
 import { DEFAULT_ADMISSION_POLICY } from "../src/policy.js";
 import { withFleetLock } from "../src/reconcile.js";
-import type { CaptureProvider, FleetSurface, ManagedAgent, SpawnAgentOptions, StateEvent } from "../src/types.js";
+import { writeJob, type ProcessIdentity } from "../src/registry.js";
+import type { CaptureProvider, FleetSurface, JobRecord, ManagedAgent, SpawnAgentOptions, StateEvent } from "../src/types.js";
 
 let root = "", previousStateDir: string | undefined;
 const services: FleetService[] = [];
@@ -33,7 +34,7 @@ const admin: Caller = { kind: "admin" };
 const asSession = (service: FleetService, peer = "agent-1"): Caller => ({ kind: "session", session: service.session, peer });
 const codeOf = (fn: () => unknown): string | undefined => { try { fn(); return undefined; } catch (error) { return error instanceof FleetError ? error.code : String(error); } };
 
-async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity): Promise<FleetService> {
+async function openFleet(surface: FleetSurface = "library", session?: SessionIdentity, refresher?: { scan: (signal: AbortSignal) => Promise<ProcessIdentity[]>; intervalMs?: number; idleMs?: number }): Promise<FleetService> {
   const spawn = (async (options: SpawnAgentOptions) => {
     let finish!: (code: number) => void;
     const exited = new Promise<number>((resolve) => { finish = resolve; });
@@ -54,6 +55,7 @@ async function openFleet(surface: FleetSurface = "library", session?: SessionIde
   };
   const snapshot = (): Array<{ pid: number; startTime: string }> => [{ pid: process.pid, startTime: selfSupervisor("library").startTime }];
   const service = await FleetService.open({ surface, ...(session === undefined ? {} : { session }), spawn, capture,
+    ...(refresher === undefined ? {} : { stalenessScan: refresher.scan, stalenessRefreshMs: refresher.intervalMs, ...(refresher.idleMs === undefined ? {} : { stalenessIdleRescanMs: refresher.idleMs }) }),
     reconcile: { snapshot }, guard: { accelerators: () => undefined, freeMemoryMb: () => 100_000 } });
   services.push(service);
   return service;
@@ -84,6 +86,64 @@ test("submit applies every default, records env keys only, and starts immediatel
   expect(record.supervisor).toMatchObject({ pid: process.pid, surface: "library" });
   expect(JSON.stringify(record)).not.toContain("hunter2");
 });
+
+test("staleness refresher runs only for unshadowed v1 records, outside the lock, and stops on close", async () => {
+  let calls = 0;
+  const service = await openFleet("library", identity("refresh"), { scan: async () => { calls++; expect(fs.existsSync(path.join(root, "fleet", "lock"))).toBe(false); return []; }, intervalMs: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(calls).toBe(0);
+  writeJob({ version: 1, jobId: "ghost", rootPid: 99991, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(calls).toBeGreaterThan(0);
+  await service.close();
+  const stoppedAt = calls;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(calls).toBe(stoppedAt);
+});
+
+test("a v1 job created after the last view occupies maxRunning until a later view proves it stale", async () => {
+  const stale = { version: 1 as const, jobId: "old-v1", rootPid: 99990, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 120_000).toISOString() };
+  writeJob(stale as JobRecord);
+  let scans = 0, first!: () => void;
+  const firstScan = new Promise<void>((resolve) => { first = resolve; });
+  const service = await openFleet("library", identity("caps"), { intervalMs: 20, scan: async () => { scans++; if (scans === 1) first(); return []; } });
+  service.setPolicy({ ...DEFAULT_ADMISSION_POLICY, maxRunning: 1 });
+  await firstScan;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const fresh = { ...stale, jobId: "fresh-v1", rootPid: 99989, createdAt: new Date().toISOString() };
+  writeJob(fresh as JobRecord);
+  const queued = await service.submit({ command: "echo later", admission: "queued" }, asSession(service));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(service.get("fresh-v1", asSession(service)).job.state).toBe("running");
+  expect(service.get(queued.jobId, asSession(service)).job.state).toBe("queued");
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(codeOf(() => service.get("fresh-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND");
+  expect(service.get(queued.jobId, asSession(service)).job.state).toBe("running");
+});
+test("staleness refresher keeps the last view on failure, scans once per unchanged set, and aborts on close", async () => {
+  writeJob({ version: 1, jobId: "gone-v1", rootPid: 99_988, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  fs.utimesSync(path.join(root, "gone-v1.json"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  let calls = 0, release!: () => void, aborted = false;
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  const service = await openFleet("library", identity("backoff"), { intervalMs: 5, idleMs: 60_000, scan: async (signal: AbortSignal) => {
+    calls++;
+    if (calls === 1) return [];
+    signal.addEventListener("abort", () => { aborted = true; });
+    await hold; // a slow scan: the next ticks must not start another one
+    throw new Error("scan failed");
+  } });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(calls).toBe(1); // the set of v1 records did not change, so no rescan
+  expect(codeOf(() => service.get("gone-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND");
+  writeJob({ version: 1, jobId: "another-v1", rootPid: 99_987, startTime: "1", harness: "custom", peer: "tester", cwd: root, backend: "unknown", mode: "linux-env-pgid", createdAt: new Date(Date.now() - 60_000).toISOString() } as JobRecord);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(calls).toBe(2); // the set changed: one more scan, which is still in flight
+  release(); await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(codeOf(() => service.get("gone-v1", asSession(service)))).toBe("E_JOB_NOT_FOUND"); // the failed scan kept the last view
+  await service.close();
+  expect(aborted).toBe(true);
+});
+
 test("every submit validation failure names its field", async () => {
   const service = await openFleet(), caller = asSession(service);
   const cases: Array<[string, Record<string, unknown>]> = [
